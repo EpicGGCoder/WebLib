@@ -11,6 +11,8 @@ import {
   ShieldCheck,
   Unplug,
   RefreshCw,
+  Minus,
+  Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,14 +68,24 @@ export function PdfPane({
   const [book, setBook] = React.useState<Book | null>(null);
   const [url, setUrl] = React.useState<string | null>(null);
   const [pageInput, setPageInput] = React.useState(String(page));
+  // displayPage = the page the iframe is actually rendering. Only changes on
+  // an explicit jump (gotoAndRemember) or a full book load — NOT on a bookmark
+  // nudge, so +/- can update the bookmark without reloading the PDF.
   const [displayPage, setDisplayPage] = React.useState(page);
   const [reloadKey, setReloadKey] = React.useState(0);
   const [status, setStatus] = React.useState<PaneStatus>("loading");
 
-  // keep input in sync when the pane's page changes externally (e.g. split load)
+  // ref to the current bookmarked page so loadBook (keyed on bookId only)
+  // can read the fresh value without re-creating on every page change.
+  const pageRef = React.useRef(page);
+  pageRef.current = page;
+
+  // keep the box in sync when the pane's bookmarked page changes externally
+  // (e.g. loading a saved split). We intentionally do NOT touch displayPage
+  // here — the iframe should only (re)render at its page on a real jump or
+  // initial load, otherwise nudging the bookmark would reload the viewer.
   React.useEffect(() => {
     setPageInput(String(page));
-    setDisplayPage(page);
   }, [page]);
 
   const loadBook = React.useCallback(async () => {
@@ -104,6 +116,10 @@ export function PdfPane({
       if (result.ok) {
         const u = URL.createObjectURL(result.file);
         setUrl(u);
+        // render the iframe at this pane's bookmarked page on (re)load
+        const initialPage = pageRef.current;
+        setDisplayPage(initialPage);
+        setPageInput(String(initialPage));
         setReloadKey((k) => k + 1);
         setStatus("ready");
         void updateBook(b.id, { lastOpenedAt: Date.now() });
@@ -188,9 +204,54 @@ export function PdfPane({
   };
 
   /**
-   * The one action: jump the viewer to the typed page AND remember it for
-   * this pane. (Chrome's native viewer can't report its own page back to us,
-   * so this one keystroke is the smoothest possible.)
+   * Persist a page number as this pane's bookmark (and mirror it into the
+   * saved split's pane, or the book's solo bookmark). Shared by the jump
+   * action and the +/− nudge buttons.
+   */
+  const persistPage = React.useCallback(
+    async (n: number) => {
+      if (!book) return;
+      setPanePage(paneIndex, n);
+      if (activeSplitId) {
+        try {
+          const { getSplit } = await import("@/lib/pdf-store");
+          const split = await getSplit(activeSplitId);
+          if (split) {
+            const panes = split.panes.map((p, i) =>
+              i === paneIndex ? { ...p, page: n } : p
+            );
+            await updateSplit(activeSplitId, {
+              panes,
+              lastOpenedAt: Date.now(),
+            });
+          }
+        } catch {
+          /* ignore */
+        }
+      } else {
+        // ad-hoc (unsaved) session: only mirror into the book's solo
+        // bookmark when this is a true single-pane solo read, so that
+        // having the same book open in multiple panes doesn't clobber it.
+        const st = useAppStore.getState();
+        const filledPanes = st.panes.filter((p) => p.bookId);
+        const isSolo = filledPanes.length === 1;
+        if (isSolo) {
+          try {
+            await updateBook(book.id, { lastPage: n });
+            setBook({ ...book, lastPage: n });
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    },
+    [book, paneIndex, activeSplitId, setPanePage]
+  );
+
+  /**
+   * Jump the viewer to the typed page AND remember it for this pane.
+   * (Chrome's native viewer can't report its own page back to us, so this
+   * one keystroke is the smoothest way to both jump + bookmark.)
    */
   const gotoAndRemember = async () => {
     if (!book) return;
@@ -199,38 +260,21 @@ export function PdfPane({
     setPageInput(String(n));
     setDisplayPage(n);
     setReloadKey((k) => k + 1);
-    setPanePage(paneIndex, n);
-    // persist: per-pane page in the active split, plus solo book bookmark
-    if (activeSplitId) {
-      // mirror into the saved split's pane
-      try {
-        const { getSplit } = await import("@/lib/pdf-store");
-        const split = await getSplit(activeSplitId);
-        if (split) {
-          const panes = split.panes.map((p, i) =>
-            i === paneIndex ? { ...p, page: n } : p
-          );
-          await updateSplit(activeSplitId, { panes, lastOpenedAt: Date.now() });
-        }
-      } catch {
-        /* ignore */
-      }
-    } else {
-      // ad-hoc (unsaved) session: only mirror into the book's solo bookmark
-      // when this is a true single-pane solo read, so that having the same
-      // book open in multiple panes doesn't clobber the solo bookmark.
-      const st = useAppStore.getState();
-      const filledPanes = st.panes.filter((p) => p.bookId);
-      const isSolo = filledPanes.length === 1;
-      if (isSolo) {
-        try {
-          await updateBook(book.id, { lastPage: n });
-          setBook({ ...book, lastPage: n });
-        } catch {
-          /* ignore */
-        }
-      }
-    }
+    await persistPage(n);
+  };
+
+  /**
+   * Nudge the bookmarked page by +/-1 WITHOUT reloading the viewer. Use this
+   * when you've scrolled in the native viewer and want to update the bookmark
+   * to roughly where you are now — no typing, no PDF reload.
+   */
+  const nudgeBookmark = async (delta: number) => {
+    if (!book) return;
+    const max = book.pages > 0 ? book.pages : 999999;
+    const current = clampInt(pageInput, 1, max);
+    const n = clampInt(String(current + delta), 1, max);
+    setPageInput(String(n));
+    await persistPage(n);
   };
 
   const reload = () => setReloadKey((k) => k + 1);
@@ -255,8 +299,20 @@ export function PdfPane({
           </span>
         )}
 
-        {/* Page: jump + remember in one action */}
-        <div className="flex items-center gap-1">
+        {/* Page controls: [−] p.[box] /N [+] [↪go]
+            − / + : nudge the bookmark without reloading the viewer
+            Enter / ↪ : jump the viewer to the typed page AND bookmark it */}
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground"
+            onClick={() => void nudgeBookmark(-1)}
+            title="Bookmark previous page (no viewer reload)"
+            disabled={status !== "ready"}
+          >
+            <Minus className="size-3" />
+          </Button>
           <span className="text-[10px] text-muted-foreground">p.</span>
           <Input
             value={pageInput}
@@ -272,7 +328,7 @@ export function PdfPane({
             inputMode="numeric"
             className="h-6 w-10 px-1 text-center text-xs tabular-nums"
             aria-label={`Page for ${book?.name ?? "book"}`}
-            title="Type the page you're on and press Enter — WebLib jumps there and remembers it for this pane."
+            title="Type the page you're on and press Enter — jumps there and remembers it. Or use − / + to nudge the bookmark."
             disabled={status !== "ready"}
           />
           {book && book.pages > 0 && (
@@ -280,6 +336,16 @@ export function PdfPane({
               /{book.pages}
             </span>
           )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground"
+            onClick={() => void nudgeBookmark(1)}
+            title="Bookmark next page (no viewer reload)"
+            disabled={status !== "ready"}
+          >
+            <Plus className="size-3" />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
