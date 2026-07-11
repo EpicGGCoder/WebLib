@@ -1,13 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { BookMarked, BookOpen, PlayCircle } from "lucide-react";
+import { BookMarked, BookOpen, PlayCircle, HardDrive, Link2 } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { LibraryView } from "@/components/library/library-view";
 import { ReaderView } from "@/components/reader/reader-view";
 import { useAppStore } from "@/lib/use-store";
-import { getStorageEstimate } from "@/lib/pdf-store";
-import { formatBytes } from "@/lib/format";
+import { isFileSystemAccessSupported } from "@/lib/pdf-store";
 import { Button } from "@/components/ui/button";
 
 export default function Home() {
@@ -91,21 +90,9 @@ function Header() {
 }
 
 function Footer() {
-  const [storage, setStorage] = React.useState<{
-    usage: number;
-    quota: number;
-  } | null>(null);
-
+  const [fsaSupported, setFsaSupported] = React.useState(false);
   React.useEffect(() => {
-    let cancelled = false;
-    getStorageEstimate()
-      .then((s) => {
-        if (!cancelled) setStorage(s);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+    setFsaSupported(isFileSystemAccessSupported());
   }, []);
 
   return (
@@ -113,12 +100,17 @@ function Footer() {
       <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-2 px-4 py-4 text-xs text-muted-foreground sm:flex-row sm:px-6">
         <div className="flex items-center gap-1.5">
           <BookOpen className="size-3.5" />
-          <span>WebLib — books are stored privately in this browser.</span>
+          <span>WebLib — your books stay on your disk.</span>
         </div>
-        {storage && storage.quota > 0 && (
-          <div className="tabular-nums">
-            Storage: {formatBytes(storage.usage)} used of ~
-            {formatBytes(storage.quota)}
+        {fsaSupported ? (
+          <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+            <Link2 className="size-3.5" />
+            <span>Link mode · reads from your disk, no copies</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <HardDrive className="size-3.5" />
+            <span>Copy mode · use Chrome/Edge to link files instead</span>
           </div>
         )}
       </div>

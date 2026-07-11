@@ -8,6 +8,10 @@ export interface Book {
   lastOpenedAt: number;
   // accent color seed derived from name, used for the gradient cover
   hue: number;
+  // how the file is referenced: 'handle' = File System Access handle
+  // (reads from disk on demand, no copy); 'blob' = copied into IndexedDB
+  // (fallback for browsers without the File System Access API)
+  source: "handle" | "blob";
 }
 
 export interface BookWithUrl extends Book {

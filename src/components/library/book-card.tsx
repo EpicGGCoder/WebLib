@@ -8,6 +8,7 @@ import {
   Bookmark,
   Clock,
   FileText,
+  HardDrive,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -60,12 +61,23 @@ export function BookCard({
             <span className="rounded-md bg-black/25 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-white/90 backdrop-blur-sm">
               PDF
             </span>
-            {book.lastPage > 1 && (
-              <span className="flex items-center gap-1 rounded-md bg-black/25 px-2 py-0.5 text-[10px] font-medium text-white/90 backdrop-blur-sm">
-                <Bookmark className="size-2.5" />
-                p.{book.lastPage}
-              </span>
-            )}
+            <div className="flex flex-col items-end gap-1">
+              {book.lastPage > 1 && (
+                <span className="flex items-center gap-1 rounded-md bg-black/25 px-2 py-0.5 text-[10px] font-medium text-white/90 backdrop-blur-sm">
+                  <Bookmark className="size-2.5" />
+                  p.{book.lastPage}
+                </span>
+              )}
+              {book.source === "handle" && (
+                <span
+                  className="flex items-center gap-1 rounded-md bg-emerald-400/30 px-1.5 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm"
+                  title="Reads from your disk — no copy"
+                >
+                  <HardDrive className="size-2.5" />
+                  linked
+                </span>
+              )}
+            </div>
           </div>
           <div>
             <h3 className="line-clamp-4 font-display text-lg font-semibold leading-tight text-white drop-shadow-sm">

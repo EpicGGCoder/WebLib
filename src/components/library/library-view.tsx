@@ -104,8 +104,9 @@ export function LibraryView() {
               Your library
             </h1>
             <p className="mt-1 max-w-xl text-sm text-muted-foreground">
-              Upload PDFs once and they stay here, ready to read. Open one book
-              or split two to three side by side — WebLib remembers every page.
+              Link PDFs from your disk — they stay in place and WebLib reads
+              them on demand. Open one book or split two to three side by side;
+              WebLib remembers every page.
             </p>
           </div>
           <UploadZone variant="compact" onAdded={load} />

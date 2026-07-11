@@ -1,7 +1,7 @@
 import type { Book } from "./types";
 
 const DB_NAME = "weblib-db";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const META_STORE = "books";
 const FILE_STORE = "files";
 
@@ -14,13 +14,18 @@ function openDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const db = req.result;
       if (!db.objectStoreNames.contains(META_STORE)) {
         db.createObjectStore(META_STORE, { keyPath: "id" });
       }
       if (!db.objectStoreNames.contains(FILE_STORE)) {
         db.createObjectStore(FILE_STORE);
+      }
+      // v1 -> v2: no structural change; file store may now hold
+      // FileSystemFileHandle entries instead of (or alongside) Blobs.
+      if (e.oldVersion < 1) {
+        // first install
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -55,16 +60,114 @@ export async function getBook(id: string): Promise<Book | undefined> {
   return tx<Book | undefined>(META_STORE, "readonly", (s) => s.get(id));
 }
 
-export async function getFile(id: string): Promise<Blob | undefined> {
-  return tx<Blob | undefined>(FILE_STORE, "readonly", (s) => s.get(id));
+/** Returns the raw stored file entry — a FileSystemFileHandle or a Blob (fallback). */
+export async function getFileEntry(id: string): Promise<unknown | undefined> {
+  return tx<unknown>(FILE_STORE, "readonly", (s) => s.get(id));
 }
 
-export async function saveBook(book: Book, file: Blob): Promise<void> {
+/** Is the File System Access API (showOpenFilePicker) available in this browser? */
+export function isFileSystemAccessSupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof (window as unknown as { showOpenFilePicker?: unknown })
+      .showOpenFilePicker === "function"
+  );
+}
+
+export function isHandle(entry: unknown): entry is FileSystemFileHandle {
+  if (!entry) return false;
+  // FileSystemFileHandle has getFile + queryPermission + requestPermission
+  const e = entry as {
+    getFile?: unknown;
+    queryPermission?: unknown;
+    requestPermission?: unknown;
+  };
+  return (
+    typeof e.getFile === "function" &&
+    typeof e.queryPermission === "function" &&
+    typeof e.requestPermission === "function"
+  );
+}
+
+export type PermissionState = "granted" | "denied" | "prompt" | "unknown";
+
+export async function queryReadPermission(
+  handle: FileSystemFileHandle
+): Promise<PermissionState> {
+  try {
+    const h = handle as unknown as {
+      queryPermission: (opts: { mode: string }) => Promise<string>;
+    };
+    const res = await h.queryPermission({ mode: "read" });
+    return (res as PermissionState) ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export async function requestReadPermission(
+  handle: FileSystemFileHandle
+): Promise<PermissionState> {
+  try {
+    const h = handle as unknown as {
+      requestPermission: (opts: { mode: string }) => Promise<string>;
+    };
+    const res = await h.requestPermission({ mode: "read" });
+    return (res as PermissionState) ?? "unknown";
+  } catch {
+    return "denied";
+  }
+}
+
+export type ResolvedFile =
+  | { ok: true; file: File; source: "handle" | "blob" }
+  | { ok: false; reason: "not-found" | "permission-denied"; source: "handle" | "blob" };
+
+/**
+ * Resolve a stored file entry into a File, requesting read permission for
+ * handles when `prompt` permission is allowed. Returns a discriminated result
+ * so callers can render the right UI (permission prompt / re-link / ready).
+ */
+export async function resolveFile(
+  entry: unknown,
+  opts: { autoPrompt?: boolean } = {}
+): Promise<ResolvedFile> {
+  if (isHandle(entry)) {
+    const source = "handle" as const;
+    let perm = await queryReadPermission(entry);
+    if (perm !== "granted") {
+      if (opts.autoPrompt) {
+        perm = await requestReadPermission(entry);
+      }
+    }
+    if (perm !== "granted") {
+      return { ok: false, reason: "permission-denied", source };
+    }
+    try {
+      const file = await entry.getFile();
+      return { ok: true, file, source };
+    } catch {
+      // file moved / renamed / deleted on disk
+      return { ok: false, reason: "not-found", source };
+    }
+  }
+  // Blob fallback (browsers without File System Access API)
+  if (entry instanceof Blob) {
+    const file = new File([entry], "book.pdf", { type: entry.type || "application/pdf" });
+    return { ok: true, file, source: "blob" };
+  }
+  return { ok: false, reason: "not-found", source: "blob" };
+}
+
+export async function saveBook(
+  book: Book,
+  fileEntry: Blob | FileSystemFileHandle
+): Promise<void> {
   const db = await openDB();
   await new Promise<void>((resolve, reject) => {
     const t = db.transaction([META_STORE, FILE_STORE], "readwrite");
     t.objectStore(META_STORE).put(book);
-    t.objectStore(FILE_STORE).put(file, book.id);
+    t.objectStore(FILE_STORE).put(fileEntry, book.id);
     t.oncomplete = () => resolve();
     t.onerror = () => reject(t.error);
   });
@@ -101,14 +204,6 @@ export async function deleteBook(id: string): Promise<void> {
   });
 }
 
-export async function getStorageEstimate(): Promise<{ usage: number; quota: number }> {
-  if (typeof navigator !== "undefined" && navigator.storage?.estimate) {
-    const { usage = 0, quota = 0 } = await navigator.storage.estimate();
-    return { usage, quota };
-  }
-  return { usage: 0, quota: 0 };
-}
-
 /**
  * Best-effort PDF page counter. Scans the raw bytes for "/Type /Page" markers
  * (excluding "/Pages"). Falls back to the largest "/Count N" value. Returns 0
@@ -118,7 +213,6 @@ export async function countPdfPages(file: Blob): Promise<number> {
   try {
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
-    // decode as latin1 so each byte maps to one char (PDFs are byte-oriented)
     let count = 0;
     const needle = "/Type";
     const chunk = 0x20000;
@@ -127,12 +221,10 @@ export async function countPdfPages(file: Blob): Promise<number> {
       const sub = bytes.subarray(i, Math.min(i + chunk, bytes.length));
       let s = carry;
       for (let j = 0; j < sub.length; j++) s += String.fromCharCode(sub[j]);
-      // search for /Type /Page not followed by 's'
       let idx = 0;
       while (idx < s.length) {
         const found = s.indexOf(needle, idx);
         if (found === -1) break;
-        // look at what follows /Type
         let k = found + needle.length;
         while (k < s.length && (s[k] === " " || s[k] === "\t" || s[k] === "\n" || s[k] === "\r")) k++;
         if (s.startsWith("/Page", k) && s[k + 5] !== "s") {
@@ -140,7 +232,6 @@ export async function countPdfPages(file: Blob): Promise<number> {
         }
         idx = found + needle.length;
       }
-      // keep a tail to avoid splitting a needle across chunk boundary
       carry = s.slice(-needle.length);
     }
     if (count > 0) return count;
@@ -164,4 +255,25 @@ export async function countPdfPages(file: Blob): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+/** Open the native file picker and return handles (Chrome/Edge) — throws if unsupported. */
+export async function pickPdfHandles(): Promise<FileSystemFileHandle[]> {
+  const w = window as unknown as {
+    showOpenFilePicker: (opts: {
+      multiple: boolean;
+      types: { description: string; accept: Record<string, string[]> }[];
+      excludeAcceptAllOption?: boolean;
+    }) => Promise<FileSystemFileHandle[]>;
+  };
+  return w.showOpenFilePicker({
+    multiple: true,
+    types: [
+      {
+        description: "PDF documents",
+        accept: { "application/pdf": [".pdf"] },
+      },
+    ],
+    excludeAcceptAllOption: true,
+  });
 }

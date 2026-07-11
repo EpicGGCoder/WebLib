@@ -1,10 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { UploadCloud, Loader2, FileText } from "lucide-react";
+import { UploadCloud, Loader2, FileText, HardDrive, Link2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { saveBook, countPdfPages } from "@/lib/pdf-store";
+import {
+  saveBook,
+  countPdfPages,
+  isFileSystemAccessSupported,
+  pickPdfHandles,
+} from "@/lib/pdf-store";
 import { hueFromName, stripPdfExt } from "@/lib/format";
 import type { Book } from "@/lib/types";
 import { toast } from "sonner";
@@ -23,32 +28,151 @@ export function UploadZone({
 }: UploadZoneProps) {
   const [dragging, setDragging] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [fsaSupported] = React.useState(() => isFileSystemAccessSupported());
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  const handleFiles = React.useCallback(
+  // Shared: build a Book record from a file name + size, computing pages.
+  const buildBook = async (
+    name: string,
+    size: number,
+    file: Blob,
+    source: "handle" | "blob"
+  ): Promise<Book> => {
+    const pages = await countPdfPages(file);
+    return {
+      id: uuid(),
+      name: stripPdfExt(name),
+      size,
+      pages,
+      lastPage: 1,
+      addedAt: Date.now(),
+      lastOpenedAt: Date.now(),
+      hue: hueFromName(name),
+      source,
+    };
+  };
+
+  // ---- File System Access API path (Chrome/Edge): link, don't copy ----
+  const handlePickFsa = React.useCallback(async () => {
+    setBusy(true);
+    try {
+      const handles = await pickPdfHandles();
+      if (handles.length === 0) return;
+      let added = 0;
+      for (const handle of handles) {
+        try {
+          const file = await handle.getFile();
+          const book = await buildBook(file.name, file.size, file, "handle");
+          await saveBook(book, handle);
+          added++;
+        } catch (e) {
+          console.error(e);
+          toast.error(`Could not add a file from the picker`);
+        }
+      }
+      if (added > 0) {
+        toast.success(
+          added === 1
+            ? "Book linked from your disk"
+            : `${added} books linked from your disk`,
+          {
+            description: fsaSupported
+              ? "Files stay in place — WebLib reads them on demand."
+              : undefined,
+          }
+        );
+        onAdded();
+      }
+    } catch (e) {
+      const err = e as { name?: string };
+      if (err?.name === "AbortError") {
+        // user cancelled the picker — silent
+      } else {
+        console.error(e);
+        toast.error("Could not open the file picker");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [onAdded, fsaSupported]);
+
+  // ---- Drag & drop path ----
+  const handleDropItems = React.useCallback(
+    async (dataTransfer: DataTransfer) => {
+      setBusy(true);
+      let added = 0;
+      const items = Array.from(dataTransfer.items).filter(
+        (i) => i.kind === "file"
+      );
+      for (const item of items) {
+        // Prefer a file-system handle (link mode) when available.
+        const asHandle = (
+          item as unknown as { getAsFileSystemHandle?: () => Promise<unknown> }
+        ).getAsFileSystemHandle;
+        let file: File | null = null;
+        let entry: Blob | FileSystemFileHandle | null = null;
+        let source: "handle" | "blob" = "blob";
+
+        if (typeof asHandle === "function") {
+          try {
+            const h = await asHandle.call(item);
+            if (h && (h as { getFile?: unknown }).getFile) {
+              const handle = h as FileSystemFileHandle;
+              file = await handle.getFile();
+              entry = handle;
+              source = "handle";
+            }
+          } catch {
+            /* fall through to blob */
+          }
+        }
+        if (!file) {
+          file = item.getAsFile();
+          if (file) {
+            entry = file;
+            source = "blob";
+          }
+        }
+        if (!file || !entry) continue;
+        if (file.type !== "application/pdf" && !/\.pdf$/i.test(file.name))
+          continue;
+        try {
+          const book = await buildBook(file.name, file.size, file, source);
+          await saveBook(book, entry);
+          added++;
+        } catch (e) {
+          console.error(e);
+          toast.error(`Failed to add "${file.name}"`);
+        }
+      }
+      setBusy(false);
+      if (added > 0) {
+        toast.success(
+          added === 1 ? "Book added to your library" : `${added} books added`
+        );
+        onAdded();
+      } else {
+        toast.error("Please drop PDF files");
+      }
+    },
+    [onAdded]
+  );
+
+  // ---- Fallback path (no File System Access API): copy bytes ----
+  const handleFilesInput = React.useCallback(
     async (files: FileList | File[]) => {
       const pdfs = Array.from(files).filter(
         (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name)
       );
       if (pdfs.length === 0) {
-        toast.error("Please drop PDF files");
+        toast.error("Please choose PDF files");
         return;
       }
       setBusy(true);
       let added = 0;
       for (const file of pdfs) {
         try {
-          const pages = await countPdfPages(file);
-          const book: Book = {
-            id: uuid(),
-            name: stripPdfExt(file.name),
-            size: file.size,
-            pages,
-            lastPage: 1,
-            addedAt: Date.now(),
-            lastOpenedAt: Date.now(),
-            hue: hueFromName(file.name),
-          };
+          const book = await buildBook(file.name, file.size, file, "blob");
           await saveBook(book, file);
           added++;
         } catch (e) {
@@ -59,7 +183,10 @@ export function UploadZone({
       setBusy(false);
       if (added > 0) {
         toast.success(
-          added === 1 ? "Book added to your library" : `${added} books added`
+          added === 1 ? "Book added to your library" : `${added} books added`,
+          {
+            description: "Copied into this browser (File System Access unavailable).",
+          }
         );
         onAdded();
       }
@@ -71,7 +198,16 @@ export function UploadZone({
     e.preventDefault();
     setDragging(false);
     if (busy) return;
-    void handleFiles(e.dataTransfer.files);
+    void handleDropItems(e.dataTransfer);
+  };
+
+  const openPicker = () => {
+    if (busy) return;
+    if (fsaSupported) {
+      void handlePickFsa();
+    } else {
+      inputRef.current?.click();
+    }
   };
 
   if (variant === "compact") {
@@ -79,28 +215,37 @@ export function UploadZone({
       <>
         <Button
           variant="outline"
-          onClick={() => inputRef.current?.click()}
+          onClick={openPicker}
           disabled={busy}
           className={cn("gap-2", className)}
+          title={
+            fsaSupported
+              ? "Link a PDF from your disk (no copy)"
+              : "Upload a PDF (copied into this browser)"
+          }
         >
           {busy ? (
             <Loader2 className="size-4 animate-spin" />
+          ) : fsaSupported ? (
+            <Link2 className="size-4" />
           ) : (
             <UploadCloud className="size-4" />
           )}
-          Upload PDF
+          {fsaSupported ? "Link PDF" : "Upload PDF"}
         </Button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="application/pdf,.pdf"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) void handleFiles(e.target.files);
-            e.target.value = "";
-          }}
-        />
+        {!fsaSupported && (
+          <input
+            ref={inputRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files?.length) void handleFilesInput(e.target.files);
+              e.target.value = "";
+            }}
+          />
+        )}
       </>
     );
   }
@@ -113,7 +258,7 @@ export function UploadZone({
       }}
       onDragLeave={() => setDragging(false)}
       onDrop={onDrop}
-      onClick={() => !busy && inputRef.current?.click()}
+      onClick={openPicker}
       className={cn(
         "group relative cursor-pointer rounded-2xl border-2 border-dashed p-8 text-center transition-all sm:p-12",
         dragging
@@ -122,17 +267,19 @@ export function UploadZone({
         className
       )}
     >
-      <input
-        ref={inputRef}
-        type="file"
-        accept="application/pdf,.pdf"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files?.length) void handleFiles(e.target.files);
-          e.target.value = "";
-        }}
-      />
+      {!fsaSupported && (
+        <input
+          ref={inputRef}
+          type="file"
+          accept="application/pdf,.pdf"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files?.length) void handleFilesInput(e.target.files);
+            e.target.value = "";
+          }}
+        />
+      )}
       <div className="mx-auto flex max-w-md flex-col items-center gap-3">
         <div
           className={cn(
@@ -143,6 +290,8 @@ export function UploadZone({
         >
           {busy ? (
             <Loader2 className="size-7 animate-spin" />
+          ) : fsaSupported ? (
+            <Link2 className="size-7" />
           ) : (
             <UploadCloud className="size-7" />
           )}
@@ -150,18 +299,39 @@ export function UploadZone({
         <div>
           <p className="font-display text-lg font-semibold text-foreground">
             {busy
-              ? "Saving to your library…"
+              ? "Adding to your library…"
               : dragging
-                ? "Drop to add to your library"
-                : "Drop PDFs here, or click to browse"}
+                ? "Drop to link to your library"
+                : fsaSupported
+                  ? "Drop PDFs here, or click to link from disk"
+                  : "Drop PDFs here, or click to browse"}
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Books are stored locally in your browser — they stay here, privately.
+            {fsaSupported ? (
+              <>
+                Files stay where they are — WebLib just remembers them and reads
+                on demand.
+              </>
+            ) : (
+              <>
+                Books are copied into this browser (File System Access API
+                unavailable).
+              </>
+            )}
           </p>
         </div>
         <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <FileText className="size-3.5" />
-          <span>Supports multiple PDF files</span>
+          {fsaSupported ? (
+            <>
+              <HardDrive className="size-3.5" />
+              <span>Reads from your disk · no copies · 40MB+ fine</span>
+            </>
+          ) : (
+            <>
+              <FileText className="size-3.5" />
+              <span>Supports multiple PDF files</span>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Search, BookOpen, Clock, UploadCloud } from "lucide-react";
+import { Search, BookOpen, Clock, UploadCloud, HardDrive } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { getAllBooks } from "@/lib/pdf-store";
@@ -112,6 +112,11 @@ export function PaneBookPicker({ onPick }: PaneBookPickerProps) {
                     <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
                       <Clock className="size-2.5" />
                       {timeAgo(b.lastOpenedAt)}
+                      {b.source === "handle" && (
+                        <HardDrive
+                          className="size-2.5 text-emerald-600 dark:text-emerald-400"
+                        />
+                      )}
                       {b.pages > 0 && (
                         <span className="text-foreground/40">·</span>
                       )}
