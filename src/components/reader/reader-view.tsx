@@ -41,6 +41,8 @@ export function ReaderView() {
   const panes = useAppStore((s) => s.panes);
   const setPaneBook = useAppStore((s) => s.setPaneBook);
   const closePane = useAppStore((s) => s.closePane);
+  const paneLayout = useAppStore((s) => s.paneLayout);
+  const setPaneLayout = useAppStore((s) => s.setPaneLayout);
   const activeSplitId = useAppStore((s) => s.activeSplitId);
   const activeSplitName = useAppStore((s) => s.activeSplitName);
   const setActiveSplit = useAppStore((s) => s.setActiveSplit);
@@ -62,6 +64,33 @@ export function ReaderView() {
   }, []);
 
   const counts = [1, 2, 3] as const;
+
+  // Debounced persistence of panel sizes into the active split.
+  const layoutSaveRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+  const handleLayout = React.useCallback(
+    (sizes: number[]) => {
+      // update live state immediately (so save-as-split captures current sizes)
+      setPaneLayout(sizes);
+      // debounce-write to the saved split record
+      if (!activeSplitId) return;
+      if (layoutSaveRef.current) clearTimeout(layoutSaveRef.current);
+      layoutSaveRef.current = setTimeout(() => {
+        void updateSplit(activeSplitId, {
+          layout: sizes,
+          lastOpenedAt: Date.now(),
+        });
+      }, 400);
+    },
+    [activeSplitId, setPaneLayout]
+  );
+
+  React.useEffect(() => {
+    return () => {
+      if (layoutSaveRef.current) clearTimeout(layoutSaveRef.current);
+    };
+  }, []);
 
   // Auto-persist structure (books / pane count) into the active split.
   const syncSplitStructure = React.useCallback(
@@ -152,6 +181,7 @@ export function ReaderView() {
       id: activeSplitId ?? uuid(),
       name,
       panes: splitPanes,
+      layout: paneLayout.slice(0, splitPanes.length),
       createdAt: Date.now(),
       lastOpenedAt: Date.now(),
     };
@@ -234,6 +264,7 @@ export function ReaderView() {
         <ResizablePanelGroup
           key={`${direction}-${paneCount}`}
           direction={direction}
+          onLayout={(sizes) => handleLayout(sizes)}
           className="h-full w-full"
         >
           {panes.slice(0, paneCount).map((pane, i) => (
@@ -249,7 +280,11 @@ export function ReaderView() {
               <ResizablePanel
                 id={`pane-${i}`}
                 order={i}
-                defaultSize={100 / paneCount}
+                defaultSize={
+                  paneLayout && paneLayout.length === paneCount
+                    ? paneLayout[i]
+                    : 100 / paneCount
+                }
                 minSize={18}
               >
                 {pane.bookId ? (

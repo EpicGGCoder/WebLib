@@ -24,6 +24,8 @@ export interface Split {
   id: string;
   name: string;
   panes: SplitPane[];
+  /** panel sizes in percent, one entry per pane (restored on reopen) */
+  layout?: number[];
   createdAt: number;
   lastOpenedAt: number;
 }

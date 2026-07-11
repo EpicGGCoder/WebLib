@@ -6,7 +6,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { LibraryView } from "@/components/library/library-view";
 import { ReaderView } from "@/components/reader/reader-view";
 import { useAppStore } from "@/lib/use-store";
-import { isFileSystemAccessSupported } from "@/lib/pdf-store";
+import { isFileSystemAccessSupported, getSplit } from "@/lib/pdf-store";
 import { Button } from "@/components/ui/button";
 
 export default function Home() {
@@ -35,13 +35,24 @@ export default function Home() {
 
 function Header() {
   const panes = useAppStore((s) => s.panes);
+  const activeSplitId = useAppStore((s) => s.activeSplitId);
   const activeSplitName = useAppStore((s) => s.activeSplitName);
   const setView = useAppStore((s) => s.setView);
   const setPaneCount = useAppStore((s) => s.setPaneCount);
+  const loadSplit = useAppStore((s) => s.loadSplit);
   const hasOpenPanes = panes.some((p) => p.bookId);
   const openCount = panes.filter((p) => p.bookId).length;
 
-  const resume = () => {
+  const resume = async () => {
+    // If a saved split is active, reload it from storage so its saved
+    // layout (pane sizes) is restored exactly — not just the live state.
+    if (activeSplitId) {
+      const split = await getSplit(activeSplitId);
+      if (split) {
+        loadSplit(split);
+        return;
+      }
+    }
     let maxIndex = 0;
     panes.forEach((p, i) => {
       if (p.bookId) maxIndex = Math.max(maxIndex, i);
@@ -80,7 +91,7 @@ function Header() {
               variant="outline"
               size="sm"
               className="gap-2"
-              onClick={resume}
+              onClick={() => void resume()}
             >
               <PlayCircle className="size-4" />
               <span className="hidden max-w-[40vw] truncate sm:inline">
