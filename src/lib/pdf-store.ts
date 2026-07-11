@@ -1,9 +1,10 @@
-import type { Book } from "./types";
+import type { Book, Split } from "./types";
 
 const DB_NAME = "weblib-db";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const META_STORE = "books";
 const FILE_STORE = "files";
+const SPLIT_STORE = "splits";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -22,8 +23,11 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(FILE_STORE)) {
         db.createObjectStore(FILE_STORE);
       }
-      // v1 -> v2: no structural change; file store may now hold
-      // FileSystemFileHandle entries instead of (or alongside) Blobs.
+      if (!db.objectStoreNames.contains(SPLIT_STORE)) {
+        db.createObjectStore(SPLIT_STORE, { keyPath: "id" });
+      }
+      // v1->v3: books + files stores already existed; splits added in v3.
+      // No structural migration needed for existing entries.
       if (e.oldVersion < 1) {
         // first install
       }
@@ -202,6 +206,53 @@ export async function deleteBook(id: string): Promise<void> {
     t.oncomplete = () => resolve();
     t.onerror = () => reject(t.error);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Saved splits (multi-pane layouts)
+// ---------------------------------------------------------------------------
+
+export async function getAllSplits(): Promise<Split[]> {
+  const splits = await tx<Split[]>(SPLIT_STORE, "readonly", (s) => s.getAll());
+  return splits.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+}
+
+export async function getSplit(id: string): Promise<Split | undefined> {
+  return tx<Split | undefined>(SPLIT_STORE, "readonly", (s) => s.get(id));
+}
+
+export async function saveSplit(split: Split): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction(SPLIT_STORE, "readwrite");
+    t.objectStore(SPLIT_STORE).put(split);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+  });
+}
+
+export async function updateSplit(
+  id: string,
+  patch: Partial<Omit<Split, "id">>
+): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction(SPLIT_STORE, "readwrite");
+    const s = t.objectStore(SPLIT_STORE);
+    const getReq = s.get(id);
+    getReq.onsuccess = () => {
+      const existing = getReq.result as Split | undefined;
+      if (existing) {
+        s.put({ ...existing, ...patch, id });
+      }
+    };
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+  });
+}
+
+export async function deleteSplit(id: string): Promise<void> {
+  await tx(SPLIT_STORE, "readwrite", (s) => s.delete(id));
 }
 
 /**

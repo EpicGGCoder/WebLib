@@ -5,20 +5,29 @@ import { Library, Search, BookMarked, Inbox } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { UploadZone } from "./upload-zone";
 import { BookCard } from "./book-card";
-import { getAllBooks, deleteBook, updateBook } from "@/lib/pdf-store";
+import { SavedSplits } from "./saved-splits";
+import {
+  getAllBooks,
+  getAllSplits,
+  deleteBook,
+  updateBook,
+  getBook,
+} from "@/lib/pdf-store";
 import { useAppStore } from "@/lib/use-store";
-import type { Book } from "@/lib/types";
+import type { Book, Split } from "@/lib/types";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 export function LibraryView() {
   const [books, setBooks] = React.useState<Book[]>([]);
+  const [splits, setSplits] = React.useState<Split[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [query, setQuery] = React.useState("");
   const libraryVersion = useAppStore((s) => s.libraryVersion);
-  const openBook = useAppStore((s) => s.openBook);
+  const openBookSolo = useAppStore((s) => s.openBookSolo);
   const setPaneCount = useAppStore((s) => s.setPaneCount);
   const setPaneBook = useAppStore((s) => s.setPaneBook);
+  const setActiveSplit = useAppStore((s) => s.setActiveSplit);
   const setView = useAppStore((s) => s.setView);
   const panes = useAppStore((s) => s.panes);
   const paneCount = useAppStore((s) => s.paneCount);
@@ -26,7 +35,9 @@ export function LibraryView() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      setBooks(await getAllBooks());
+      const [b, sp] = await Promise.all([getAllBooks(), getAllSplits()]);
+      setBooks(b);
+      setSplits(sp);
     } catch (e) {
       console.error(e);
     } finally {
@@ -39,34 +50,42 @@ export function LibraryView() {
   }, [load, libraryVersion]);
 
   const handleAddToSplit = React.useCallback(
-    (id: string) => {
-      // find first empty pane; if none, replace the last pane
+    async (id: string) => {
       let target = panes.findIndex((p) => !p.bookId);
+      const initialPage = (await getBook(id))?.lastPage ?? 1;
       if (target === -1) target = Math.max(0, paneCount - 1);
-      // ensure at least 2 panes
       if (paneCount < 2) {
         setPaneCount(2);
         target = Math.min(target, 1);
       }
-      setPaneBook(target, id);
+      // opening a split from the library is an ad-hoc (unsaved) layout
+      setActiveSplit(null, null);
+      setPaneBook(target, id, initialPage);
       setView("reader");
-      // bump lastOpenedAt
       void updateBook(id, { lastOpenedAt: Date.now() }).then(load);
     },
-    [panes, paneCount, setPaneCount, setPaneBook, setView, load]
+    [
+      panes,
+      paneCount,
+      setPaneCount,
+      setPaneBook,
+      setActiveSplit,
+      setView,
+      load,
+    ]
   );
 
   const handleOpen = React.useCallback(
-    (id: string) => {
-      openBook(id);
+    async (id: string) => {
+      const b = await getBook(id);
+      openBookSolo(id, b?.lastPage ?? 1);
       void updateBook(id, { lastOpenedAt: Date.now() }).then(load);
     },
-    [openBook, load]
+    [openBookSolo, load]
   );
 
   const handleDelete = React.useCallback(
     async (id: string) => {
-      // remove from any open pane
       panes.forEach((p, i) => {
         if (p.bookId === id) setPaneBook(i, null);
       });
@@ -114,6 +133,11 @@ export function LibraryView() {
 
         <UploadZone onAdded={load} />
       </section>
+
+      {/* Saved splits */}
+      {!loading && splits.length > 0 && (
+        <SavedSplits splits={splits} books={books} onChanged={load} />
+      )}
 
       {/* Books */}
       {books.length > 0 && (
@@ -182,7 +206,7 @@ function EmptyState() {
       <div>
         <p className="font-display text-lg font-semibold">Your shelves are empty</p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Upload your first PDF above to start building your library.
+          Link your first PDF above to start building your library.
         </p>
       </div>
     </div>

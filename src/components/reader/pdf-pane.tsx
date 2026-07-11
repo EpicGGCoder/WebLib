@@ -3,7 +3,6 @@
 import * as React from "react";
 import {
   X,
-  Bookmark,
   CornerDownRight,
   ArrowLeftRight,
   Loader2,
@@ -21,17 +20,22 @@ import {
   resolveFile,
   saveBook,
   updateBook,
+  updateSplit,
   isFileSystemAccessSupported,
   pickPdfHandles,
   isHandle,
+  countPdfPages,
 } from "@/lib/pdf-store";
 import type { Book } from "@/lib/types";
+import { useAppStore } from "@/lib/use-store";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 interface PdfPaneProps {
   bookId: string;
   paneIndex: number;
+  page: number; // this pane's current remembered page
+  activeSplitId: string | null;
   onClose: () => void;
   onChangeBook: () => void;
 }
@@ -53,21 +57,28 @@ function clampInt(v: string, min: number, max: number): number {
 export function PdfPane({
   bookId,
   paneIndex,
+  page,
+  activeSplitId,
   onClose,
   onChangeBook,
 }: PdfPaneProps) {
+  const setPanePage = useAppStore((s) => s.setPanePage);
   const [book, setBook] = React.useState<Book | null>(null);
   const [url, setUrl] = React.useState<string | null>(null);
-  const [pageInput, setPageInput] = React.useState("1");
-  const [displayPage, setDisplayPage] = React.useState(1);
+  const [pageInput, setPageInput] = React.useState(String(page));
+  const [displayPage, setDisplayPage] = React.useState(page);
   const [reloadKey, setReloadKey] = React.useState(0);
   const [status, setStatus] = React.useState<PaneStatus>("loading");
 
-  // Load book + resolve file entry whenever bookId changes.
+  // keep input in sync when the pane's page changes externally (e.g. split load)
+  React.useEffect(() => {
+    setPageInput(String(page));
+    setDisplayPage(page);
+  }, [page]);
+
   const loadBook = React.useCallback(async () => {
     setStatus("loading");
     setBook(null);
-    // revoke any previous object url
     setUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
@@ -80,8 +91,6 @@ export function PdfPane({
         return;
       }
       setBook(b);
-      setPageInput(String(b.lastPage));
-      setDisplayPage(b.lastPage);
 
       const entry = await getFileEntry(bookId);
       if (!entry) {
@@ -90,8 +99,6 @@ export function PdfPane({
       }
 
       const isHandleEntry = isHandle(entry);
-      // For handles, do NOT auto-prompt on first load — show a clean
-      // "allow access" button so the user controls the permission prompt.
       const result = await resolveFile(entry, { autoPrompt: false });
 
       if (result.ok) {
@@ -100,10 +107,7 @@ export function PdfPane({
         setReloadKey((k) => k + 1);
         setStatus("ready");
         void updateBook(b.id, { lastOpenedAt: Date.now() });
-      } else if (
-        result.reason === "permission-denied" &&
-        isHandleEntry
-      ) {
+      } else if (result.reason === "permission-denied" && isHandleEntry) {
         setStatus("needs-permission");
       } else if (result.reason === "not-found") {
         setStatus("not-found");
@@ -120,7 +124,6 @@ export function PdfPane({
     void loadBook();
   }, [loadBook]);
 
-  // Cleanup object URL on unmount / book change.
   React.useEffect(() => {
     return () => {
       setUrl((prev) => {
@@ -165,13 +168,10 @@ export function PdfPane({
       if (!handles[0]) return;
       const handle = handles[0];
       const file = await handle.getFile();
-      // keep the same book id, update name/size/pages if changed
       const patch: Partial<Book> = {
         size: file.size,
         name: book?.name ?? file.name.replace(/\.pdf$/i, ""),
       };
-      // re-count pages (cheap-ish)
-      const { countPdfPages } = await import("@/lib/pdf-store");
       const pages = await countPdfPages(file);
       if (pages > 0) patch.pages = pages;
       await saveBook({ ...(book as Book), ...patch } as Book, handle);
@@ -187,97 +187,77 @@ export function PdfPane({
     }
   };
 
-  const saveBookmark = async () => {
+  /**
+   * The one action: jump the viewer to the typed page AND remember it for
+   * this pane. (Chrome's native viewer can't report its own page back to us,
+   * so this one keystroke is the smoothest possible.)
+   */
+  const gotoAndRemember = async () => {
     if (!book) return;
-    const max = book.pages > 0 ? book.pages : 999999;
-    const n = clampInt(pageInput, 1, max);
-    setPageInput(String(n));
-    try {
-      await updateBook(book.id, { lastPage: n });
-      setBook({ ...book, lastPage: n });
-      toast.success(`Bookmark saved · page ${n}`, {
-        description: book.name,
-      });
-    } catch {
-      toast.error("Could not save bookmark");
-    }
-  };
-
-  const jumpToPage = async () => {
-    if (!book || !url) return;
     const max = book.pages > 0 ? book.pages : 999999;
     const n = clampInt(pageInput, 1, max);
     setPageInput(String(n));
     setDisplayPage(n);
     setReloadKey((k) => k + 1);
-    try {
-      await updateBook(book.id, { lastPage: n });
-      setBook({ ...book, lastPage: n });
-    } catch {
-      /* ignore */
+    setPanePage(paneIndex, n);
+    // persist: per-pane page in the active split, plus solo book bookmark
+    if (activeSplitId) {
+      // mirror into the saved split's pane
+      try {
+        const { getSplit } = await import("@/lib/pdf-store");
+        const split = await getSplit(activeSplitId);
+        if (split) {
+          const panes = split.panes.map((p, i) =>
+            i === paneIndex ? { ...p, page: n } : p
+          );
+          await updateSplit(activeSplitId, { panes, lastOpenedAt: Date.now() });
+        }
+      } catch {
+        /* ignore */
+      }
+    } else {
+      // ad-hoc (unsaved) session: only mirror into the book's solo bookmark
+      // when this is a true single-pane solo read, so that having the same
+      // book open in multiple panes doesn't clobber the solo bookmark.
+      const st = useAppStore.getState();
+      const filledPanes = st.panes.filter((p) => p.bookId);
+      const isSolo = filledPanes.length === 1;
+      if (isSolo) {
+        try {
+          await updateBook(book.id, { lastPage: n });
+          setBook({ ...book, lastPage: n });
+        } catch {
+          /* ignore */
+        }
+      }
     }
   };
 
-  const reload = () => {
-    setReloadKey((k) => k + 1);
-  };
+  const reload = () => setReloadKey((k) => k + 1);
 
   return (
     <div className="flex h-full min-w-0 flex-col bg-card">
-      {/* Pane header */}
-      <div className="flex flex-col gap-2 border-b border-border bg-card/95 px-3 py-2 backdrop-blur">
-        <div className="flex items-center gap-2">
-          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-[11px] font-semibold text-primary">
-            {paneIndex + 1}
+      {/* Slim single-row pane header */}
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border bg-card/95 px-2 backdrop-blur">
+        <span className="flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 text-[10px] font-semibold text-primary">
+          {paneIndex + 1}
+        </span>
+        <h3 className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
+          {book?.name ?? "Loading…"}
+        </h3>
+        {book?.source === "handle" && (
+          <span
+            className="hidden items-center gap-1 rounded bg-emerald-500/10 px-1 py-0.5 text-[9px] font-medium text-emerald-600 dark:text-emerald-400 md:inline-flex"
+            title="Reads from your disk — no copy"
+          >
+            <ShieldCheck className="size-2.5" />
+            linked
           </span>
-          <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-            {book?.name ?? "Loading…"}
-          </h3>
-          {book?.source === "handle" && (
-            <span
-              className="hidden items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 sm:inline-flex"
-              title="Reads from your disk — no copy"
-            >
-              <ShieldCheck className="size-2.5" />
-              linked
-            </span>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 shrink-0 text-muted-foreground"
-            onClick={reload}
-            title="Reload viewer"
-            disabled={status !== "ready"}
-          >
-            <RotateCw className="size-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 shrink-0 text-muted-foreground"
-            onClick={onChangeBook}
-            title="Change book"
-            disabled={status === "loading"}
-          >
-            <ArrowLeftRight className="size-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 shrink-0 text-muted-foreground hover:text-destructive"
-            onClick={onClose}
-            title="Close pane"
-          >
-            <X className="size-4" />
-          </Button>
-        </div>
+        )}
 
-        {/* Page memory controls */}
-        <div className="flex items-center gap-1.5">
-          <span className="text-[11px] font-medium text-muted-foreground">
-            Page
-          </span>
+        {/* Page: jump + remember in one action */}
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-muted-foreground">p.</span>
           <Input
             value={pageInput}
             onChange={(e) =>
@@ -286,48 +266,66 @@ export function PdfPane({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                void saveBookmark();
+                void gotoAndRemember();
               }
             }}
             inputMode="numeric"
-            className="h-7 w-14 px-2 text-sm tabular-nums"
-            aria-label={`Page bookmark for ${book?.name ?? "book"}`}
+            className="h-6 w-10 px-1 text-center text-xs tabular-nums"
+            aria-label={`Page for ${book?.name ?? "book"}`}
+            title="Type the page you're on and press Enter — WebLib jumps there and remembers it for this pane."
             disabled={status !== "ready"}
           />
           {book && book.pages > 0 && (
-            <span className="text-[11px] text-muted-foreground tabular-nums">
-              / {book.pages}
+            <span className="hidden text-[10px] text-muted-foreground tabular-nums sm:inline">
+              /{book.pages}
             </span>
           )}
           <Button
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1 px-2 text-[11px]"
-            onClick={() => void saveBookmark()}
-            title="Save this page as your bookmark (Enter)"
-            disabled={status !== "ready"}
-          >
-            <Bookmark className="size-3" />
-            Save
-          </Button>
-          <Button
             variant="ghost"
-            size="sm"
-            className="h-7 gap-1 px-2 text-[11px]"
-            onClick={() => void jumpToPage()}
-            title="Jump the viewer to this page"
+            size="icon"
+            className="size-6 text-muted-foreground"
+            onClick={() => void gotoAndRemember()}
+            title="Jump to this page & remember it (Enter)"
             disabled={status !== "ready"}
           >
             <CornerDownRight className="size-3" />
-            Go
           </Button>
-          <span className="ml-auto hidden text-[10px] text-muted-foreground/70 sm:inline">
-            type the page you&apos;re on, then Save
-          </span>
         </div>
+
+        <div className="mx-0.5 h-4 w-px bg-border" />
+
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 text-muted-foreground"
+          onClick={reload}
+          title="Reload viewer"
+          disabled={status !== "ready"}
+        >
+          <RotateCw className="size-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 text-muted-foreground"
+          onClick={onChangeBook}
+          title="Change book"
+          disabled={status === "loading"}
+        >
+          <ArrowLeftRight className="size-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 text-muted-foreground hover:text-destructive"
+          onClick={onClose}
+          title="Close pane"
+        >
+          <X className="size-3.5" />
+        </Button>
       </div>
 
-      {/* Viewer body */}
+      {/* Viewer body — gets all remaining vertical space */}
       <div className="relative min-h-0 flex-1 bg-muted/30">
         {status === "loading" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -422,7 +420,12 @@ export function PdfPane({
                 It may have been removed from your library.
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={onChangeBook} className="gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onChangeBook}
+              className="gap-2"
+            >
               <ArrowLeftRight className="size-4" />
               Choose another book
             </Button>
@@ -434,9 +437,7 @@ export function PdfPane({
             key={reloadKey}
             src={`${url}#page=${displayPage}&toolbar=1&navpanes=1&view=FitH`}
             title={book?.name ?? "PDF viewer"}
-            className={cn(
-              "absolute inset-0 h-full w-full border-0 bg-white"
-            )}
+            className={cn("absolute inset-0 h-full w-full border-0 bg-white")}
           />
         )}
       </div>

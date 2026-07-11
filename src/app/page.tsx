@@ -35,6 +35,7 @@ export default function Home() {
 
 function Header() {
   const panes = useAppStore((s) => s.panes);
+  const activeSplitName = useAppStore((s) => s.activeSplitName);
   const setView = useAppStore((s) => s.setView);
   const setPaneCount = useAppStore((s) => s.setPaneCount);
   const hasOpenPanes = panes.some((p) => p.bookId);
@@ -49,6 +50,12 @@ function Header() {
     setPaneCount(Math.min(3, needed));
     setView("reader");
   };
+
+  const resumeLabel = activeSplitName
+    ? `Resume “${activeSplitName}”`
+    : openCount > 1
+      ? `Resume reading · ${openCount} books`
+      : "Resume reading";
 
   return (
     <header className="sticky top-0 z-30 border-b border-border/70 bg-background/80 backdrop-blur-md">
@@ -76,8 +83,8 @@ function Header() {
               onClick={resume}
             >
               <PlayCircle className="size-4" />
-              <span className="hidden sm:inline">
-                Resume reading{openCount > 1 ? ` · ${openCount} books` : ""}
+              <span className="hidden max-w-[40vw] truncate sm:inline">
+                {resumeLabel}
               </span>
               <span className="sm:hidden">Resume</span>
             </Button>

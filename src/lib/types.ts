@@ -3,10 +3,9 @@ export interface Book {
   name: string;
   size: number;
   pages: number; // best-effort total page count (0 if unknown)
-  lastPage: number; // last saved page (1-based); 1 if never opened
+  lastPage: number; // last saved page when opened SOLO (1-based)
   addedAt: number;
   lastOpenedAt: number;
-  // accent color seed derived from name, used for the gradient cover
   hue: number;
   // how the file is referenced: 'handle' = File System Access handle
   // (reads from disk on demand, no copy); 'blob' = copied into IndexedDB
@@ -14,12 +13,19 @@ export interface Book {
   source: "handle" | "blob";
 }
 
-export interface BookWithUrl extends Book {
-  url: string; // object URL for the PDF blob
+/** One slot inside a saved split layout. */
+export interface SplitPane {
+  bookId: string;
+  page: number; // this pane's own remembered page (1-based)
 }
 
-export type PaneState = {
-  bookId: string | null;
-};
+/** A saved multi-pane layout the user can reopen from the home screen. */
+export interface Split {
+  id: string;
+  name: string;
+  panes: SplitPane[];
+  createdAt: number;
+  lastOpenedAt: number;
+}
 
 export type View = "library" | "reader";

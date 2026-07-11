@@ -1,17 +1,38 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Columns2, Square, Columns3, PanelLeft } from "lucide-react";
+import {
+  ArrowLeft,
+  Columns2,
+  Square,
+  Columns3,
+  PanelLeft,
+  Save,
+  Check,
+  BookmarkCheck,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   ResizablePanelGroup,
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { useAppStore } from "@/lib/use-store";
+import { saveSplit, updateSplit, getBook } from "@/lib/pdf-store";
 import { PdfPane } from "./pdf-pane";
 import { PaneBookPicker } from "./pane-book-picker";
 import { cn } from "@/lib/utils";
+import type { Split, SplitPane } from "@/lib/types";
+import { toast } from "sonner";
+import { v4 as uuid } from "uuid";
 
 export function ReaderView() {
   const setView = useAppStore((s) => s.setView);
@@ -20,10 +41,16 @@ export function ReaderView() {
   const panes = useAppStore((s) => s.panes);
   const setPaneBook = useAppStore((s) => s.setPaneBook);
   const closePane = useAppStore((s) => s.closePane);
+  const activeSplitId = useAppStore((s) => s.activeSplitId);
+  const activeSplitName = useAppStore((s) => s.activeSplitName);
+  const setActiveSplit = useAppStore((s) => s.setActiveSplit);
+  const bumpLibrary = useAppStore((s) => s.bumpLibrary);
 
   const [direction, setDirection] = React.useState<
     "horizontal" | "vertical"
   >("horizontal");
+  const [saveOpen, setSaveOpen] = React.useState(false);
+  const [splitName, setSplitName] = React.useState("");
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
@@ -36,23 +63,147 @@ export function ReaderView() {
 
   const counts = [1, 2, 3] as const;
 
+  // Auto-persist structure (books / pane count) into the active split.
+  const syncSplitStructure = React.useCallback(
+    async (nextPanes: typeof panes) => {
+      if (!activeSplitId) return;
+      const splitPanes: SplitPane[] = nextPanes
+        .filter((p) => p.bookId)
+        .map((p) => ({ bookId: p.bookId as string, page: p.page }));
+      try {
+        await updateSplit(activeSplitId, {
+          panes: splitPanes,
+          lastOpenedAt: Date.now(),
+        });
+      } catch {
+        /* ignore */
+      }
+    },
+    [activeSplitId]
+  );
+
+  const handleSetPaneBook = React.useCallback(
+    async (index: number, bookId: string | null) => {
+      let initialPage = 1;
+      if (bookId) {
+        try {
+          const b = await getBook(bookId);
+          if (b) initialPage = b.lastPage;
+        } catch {
+          /* ignore */
+        }
+      }
+      setPaneBook(index, bookId, initialPage);
+      // sync after state update
+      setTimeout(() => {
+        const latest = useAppStore.getState().panes;
+        void syncSplitStructure(latest);
+      }, 0);
+    },
+    [setPaneBook, syncSplitStructure]
+  );
+
+  const handleClosePane = React.useCallback(
+    (index: number) => {
+      closePane(index);
+      setTimeout(() => {
+        void syncSplitStructure(useAppStore.getState().panes);
+      }, 0);
+    },
+    [closePane, syncSplitStructure]
+  );
+
+  const handleSetPaneCount = React.useCallback(
+    (n: number) => {
+      setPaneCount(n);
+      setTimeout(() => {
+        void syncSplitStructure(useAppStore.getState().panes);
+      }, 0);
+    },
+    [setPaneCount, syncSplitStructure]
+  );
+
+  const openSaveDialog = () => {
+    // prefill a sensible name from open books
+    const filled = panes.filter((p) => p.bookId);
+    if (filled.length === 0) {
+      toast.error("Add a book to a pane first");
+      return;
+    }
+    setSplitName(
+      activeSplitName ??
+        (filled.length === 1
+          ? "Single read"
+          : `${filled.length}-way split`)
+    );
+    setSaveOpen(true);
+  };
+
+  const confirmSave = async () => {
+    const name = splitName.trim() || "Untitled split";
+    const splitPanes: SplitPane[] = panes
+      .filter((p) => p.bookId)
+      .map((p) => ({ bookId: p.bookId as string, page: p.page }));
+    if (splitPanes.length === 0) {
+      toast.error("Add a book to a pane first");
+      return;
+    }
+    const split: Split = {
+      id: activeSplitId ?? uuid(),
+      name,
+      panes: splitPanes,
+      createdAt: Date.now(),
+      lastOpenedAt: Date.now(),
+    };
+    await saveSplit(split);
+    setActiveSplit(split.id, name);
+    bumpLibrary();
+    setSaveOpen(false);
+    toast.success("Split saved", {
+      description: `“${name}” — reopen it anytime from the home screen.`,
+    });
+  };
+
   return (
     <div className="flex h-screen flex-col">
-      {/* Top bar */}
-      <header className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-3 py-2">
+      {/* Slim top bar */}
+      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-card px-2.5">
         <Button
           variant="ghost"
           size="sm"
-          className="gap-2"
+          className="h-8 gap-1.5 px-2"
           onClick={() => setView("library")}
         >
           <ArrowLeft className="size-4" />
           <span className="hidden sm:inline">Library</span>
         </Button>
-        <div className="mx-1 hidden h-5 w-px bg-border sm:block" />
-        <span className="hidden font-display text-sm font-semibold sm:inline">
-          WebLib
-        </span>
+        <div className="mx-0.5 hidden h-4 w-px bg-border sm:block" />
+
+        {/* Split identity / save state */}
+        {activeSplitId ? (
+          <div className="flex min-w-0 items-center gap-1.5 text-xs">
+            <BookmarkCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span className="max-w-[40vw] truncate font-medium text-foreground">
+              {activeSplitName}
+            </span>
+            <span className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:inline-flex">
+              <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
+              auto-saved
+            </span>
+          </div>
+        ) : (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-1.5 px-2 text-xs"
+            onClick={openSaveDialog}
+            title="Save this layout to reopen from home"
+          >
+            <Save className="size-3.5" />
+            <span className="hidden sm:inline">Save as split</span>
+            <span className="sm:hidden">Save</span>
+          </Button>
+        )}
 
         <div className="ml-auto flex items-center gap-1 rounded-lg border border-border bg-background p-0.5">
           {counts.map((c) => {
@@ -61,9 +212,9 @@ export function ReaderView() {
             return (
               <button
                 key={c}
-                onClick={() => setPaneCount(c)}
+                onClick={() => handleSetPaneCount(c)}
                 className={cn(
-                  "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors",
+                  "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors",
                   active
                     ? "bg-primary text-primary-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
@@ -78,7 +229,7 @@ export function ReaderView() {
         </div>
       </header>
 
-      {/* Panes */}
+      {/* Panes — fill all remaining height */}
       <div className="min-h-0 flex-1">
         <ResizablePanelGroup
           key={`${direction}-${paneCount}`}
@@ -105,13 +256,15 @@ export function ReaderView() {
                   <PdfPane
                     bookId={pane.bookId}
                     paneIndex={i}
-                    onClose={() => closePane(i)}
-                    onChangeBook={() => setPaneBook(i, null)}
+                    page={pane.page}
+                    activeSplitId={activeSplitId}
+                    onClose={() => handleClosePane(i)}
+                    onChangeBook={() => handleSetPaneBook(i, null)}
                   />
                 ) : (
                   <EmptyPane
                     paneIndex={i}
-                    onPick={(id) => setPaneBook(i, id)}
+                    onPick={(id) => void handleSetPaneBook(i, id)}
                   />
                 )}
               </ResizablePanel>
@@ -119,6 +272,45 @@ export function ReaderView() {
           ))}
         </ResizablePanelGroup>
       </div>
+
+      {/* Save-as-split dialog */}
+      <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Save this split</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <p className="text-sm text-muted-foreground">
+              Name it so you can reopen this exact layout — same books, same
+              pages — from the home screen.
+            </p>
+            <Input
+              value={splitName}
+              onChange={(e) => setSplitName(e.target.value)}
+              placeholder="e.g. Questions + Answer key"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void confirmSave();
+                }
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setSaveOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button onClick={() => void confirmSave()} className="gap-2">
+              <Save className="size-4" />
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -132,12 +324,12 @@ function EmptyPane({
 }) {
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-border bg-card/95 px-3 py-2">
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-[11px] font-semibold text-muted-foreground">
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border bg-card/95 px-2">
+        <span className="flex size-5 shrink-0 items-center justify-center rounded bg-muted text-[10px] font-semibold text-muted-foreground">
           {paneIndex + 1}
         </span>
-        <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-          <PanelLeft className="size-3.5" />
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <PanelLeft className="size-3" />
           Empty slot
         </span>
       </div>
