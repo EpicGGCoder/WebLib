@@ -10,6 +10,10 @@ import {
   Save,
   Check,
   BookmarkCheck,
+  Maximize,
+  Minimize,
+  ChevronsDownUp,
+  ChevronsUpDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,6 +57,26 @@ export function ReaderView() {
   >("horizontal");
   const [saveOpen, setSaveOpen] = React.useState(false);
   const [splitName, setSplitName] = React.useState("");
+  const [isFullscreen, setIsFullscreen] = React.useState(false);
+  const [topBarCollapsed, setTopBarCollapsed] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+
+  // track fullscreen state changes (esc key, etc.)
+  React.useEffect(() => {
+    const onFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void rootRef.current?.requestFullscreen?.();
+    }
+  };
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
@@ -211,69 +235,104 @@ export function ReaderView() {
   };
 
   return (
-    <div className="flex h-screen flex-col">
-      {/* Slim top bar */}
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-card px-2.5">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 gap-1.5 px-2"
-          onClick={() => setView("library")}
+    <div ref={rootRef} className="flex h-screen flex-col">
+      {/* Slim top bar — collapses to a thin reveal strip when hidden */}
+      {topBarCollapsed ? (
+        <button
+          onClick={() => setTopBarCollapsed(false)}
+          className="group flex h-5 w-full shrink-0 items-center justify-center gap-1.5 border-b border-border/50 bg-card/80 text-[10px] text-muted-foreground backdrop-blur transition-colors hover:bg-card hover:text-foreground"
+          title="Show top bar"
         >
-          <ArrowLeft className="size-4" />
-          <span className="hidden sm:inline">Library</span>
-        </Button>
-        <div className="mx-0.5 hidden h-4 w-px bg-border sm:block" />
-
-        {/* Split identity / save state */}
-        {activeSplitId ? (
-          <div className="flex min-w-0 items-center gap-1.5 text-xs">
-            <BookmarkCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-            <span className="max-w-[40vw] truncate font-medium text-foreground">
-              {activeSplitName}
-            </span>
-            <span className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:inline-flex">
-              <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
-              auto-saved
-            </span>
-          </div>
-        ) : (
+          <ChevronsUpDown className="size-3" />
+          <span className="hidden sm:inline">show bar</span>
+        </button>
+      ) : (
+        <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-card px-2.5">
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 gap-1.5 px-2 text-xs"
-            onClick={openSaveDialog}
-            title="Save this layout to reopen from home"
+            className="h-8 gap-1.5 px-2"
+            onClick={() => setView("library")}
           >
-            <Save className="size-3.5" />
-            <span className="hidden sm:inline">Save as split</span>
-            <span className="sm:hidden">Save</span>
+            <ArrowLeft className="size-4" />
+            <span className="hidden sm:inline">Library</span>
           </Button>
-        )}
+          <div className="mx-0.5 hidden h-4 w-px bg-border sm:block" />
 
-        <div className="ml-auto flex items-center gap-1 rounded-lg border border-border bg-background p-0.5">
-          {counts.map((c) => {
-            const Icon = c === 1 ? Square : c === 2 ? Columns2 : Columns3;
-            const active = paneCount === c;
-            return (
-              <button
-                key={c}
-                onClick={() => handleSetPaneCount(c)}
-                className={cn(
-                  "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors",
-                  active
-                    ? "bg-primary text-primary-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-                title={`${c} pane${c > 1 ? "s" : ""}`}
-              >
-                <Icon className="size-3.5" />
-                <span className="hidden sm:inline">{c}</span>
-              </button>
-            );
-          })}
-        </div>
-      </header>
+          {/* Split identity / save state */}
+          {activeSplitId ? (
+            <div className="flex min-w-0 items-center gap-1.5 text-xs">
+              <BookmarkCheck className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <span className="max-w-[40vw] truncate font-medium text-foreground">
+                {activeSplitName}
+              </span>
+              <span className="hidden items-center gap-1 text-[10px] text-muted-foreground sm:inline-flex">
+                <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
+                auto-saved
+              </span>
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-xs"
+              onClick={openSaveDialog}
+              title="Save this layout to reopen from home"
+            >
+              <Save className="size-3.5" />
+              <span className="hidden sm:inline">Save as split</span>
+              <span className="sm:hidden">Save</span>
+            </Button>
+          )}
+
+          <div className="ml-auto flex items-center gap-1">
+            <div className="flex items-center gap-1 rounded-lg border border-border bg-background p-0.5">
+              {counts.map((c) => {
+                const Icon = c === 1 ? Square : c === 2 ? Columns2 : Columns3;
+                const active = paneCount === c;
+                return (
+                  <button
+                    key={c}
+                    onClick={() => handleSetPaneCount(c)}
+                    className={cn(
+                      "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors",
+                      active
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                    title={`${c} pane${c > 1 ? "s" : ""}`}
+                  >
+                    <Icon className="size-3.5" />
+                    <span className="hidden sm:inline">{c}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground"
+              onClick={() => setTopBarCollapsed(true)}
+              title="Hide top bar (more PDF space)"
+            >
+              <ChevronsDownUp className="size-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground"
+              onClick={toggleFullscreen}
+              title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            >
+              {isFullscreen ? (
+                <Minimize className="size-4" />
+              ) : (
+                <Maximize className="size-4" />
+              )}
+            </Button>
+          </div>
+        </header>
+      )}
 
       {/* Panes — fill all remaining height */}
       <div className="min-h-0 flex-1">

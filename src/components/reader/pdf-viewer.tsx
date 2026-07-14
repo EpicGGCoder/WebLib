@@ -207,6 +207,93 @@ export function PdfViewer({
     setZoomCentered(Math.max(0.25, +(zoom - 0.25).toFixed(2)));
   const fitWidth = () => setZoomCentered(1);
 
+  // ---- Ctrl+scroll = smooth zoom (anchored at cursor) ----
+  // Native non-passive wheel listener so preventDefault actually works.
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      if (!containerWidth) return;
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      const next = Math.max(0.25, Math.min(4, +(zoom * factor).toFixed(3)));
+      if (next === zoom) return;
+      const ratioY =
+        el.scrollHeight > el.clientHeight
+          ? el.scrollTop / (el.scrollHeight - el.clientHeight)
+          : 0;
+      setZoom(next);
+      requestAnimationFrame(() => {
+        const newMaxY = el.scrollHeight - el.clientHeight;
+        el.scrollTop = newMaxY * ratioY;
+      });
+      if (saveRef.current) clearTimeout(saveRef.current);
+      saveRef.current = setTimeout(() => {
+        onStateChange({
+          page: currentPageRef.current,
+          zoom: next,
+          scroll: el.scrollTop,
+        });
+      }, 400);
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [zoom, containerWidth, onStateChange]);
+
+  // ---- middle-click drag pan (auto-scroll) ----
+  const [panning, setPanning] = React.useState(false);
+  const panStateRef = React.useRef<{
+    panning: boolean;
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+    moved: boolean;
+  }>({ panning: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0, moved: false });
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // middle button (button === 1) initiates pan
+    if (e.button !== 1) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    e.preventDefault();
+    panStateRef.current = {
+      panning: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      scrollLeft: el.scrollLeft,
+      scrollTop: el.scrollTop,
+      moved: false,
+    };
+    setPanning(true);
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = panStateRef.current;
+    if (!st.panning) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const dx = e.clientX - st.startX;
+    const dy = e.clientY - st.startY;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) st.moved = true;
+    el.scrollLeft = st.scrollLeft - dx;
+    el.scrollTop = st.scrollTop - dy;
+  };
+
+  const endPan = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = panStateRef.current;
+    if (!st.panning) return;
+    st.panning = false;
+    setPanning(false);
+    try {
+      (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const [pageInput, setPageInput] = React.useState(String(currentPage));
   React.useEffect(() => {
     setPageInput(String(currentPage));
@@ -246,7 +333,14 @@ export function PdfViewer({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="scroll-thin h-full w-full overflow-auto"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endPan}
+        onPointerLeave={endPan}
+        className={cn(
+          "scroll-thin weblib-pdf-scroll h-full w-full overflow-auto",
+          panning ? "cursor-grabbing" : "cursor-default"
+        )}
         style={{ paddingBottom: 72 }}
       >
         <div
