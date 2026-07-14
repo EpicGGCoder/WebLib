@@ -152,6 +152,12 @@ export function PdfViewer({
   // to that page's new offset so the view stays on the same page.
   const prevWidthRef = React.useRef(0);
   const keepPageRef = React.useRef<number | null>(null);
+  const pageBeforeResizeRef = React.useRef(1);
+
+  // keep the ref updated with the latest current page (for resize preservation)
+  React.useEffect(() => {
+    pageBeforeResizeRef.current = currentPage;
+  });
 
   React.useLayoutEffect(() => {
     if (
@@ -159,13 +165,10 @@ export function PdfViewer({
       prevWidthRef.current !== containerWidth &&
       ready
     ) {
-      // width changed — preserve the page the user was on
-      // (currentPageRef holds the value from the previous render = before
-      //  the width change, which is exactly what we want)
-      keepPageRef.current = currentPageRef.current;
+      keepPageRef.current = pageBeforeResizeRef.current;
     }
     prevWidthRef.current = containerWidth;
-  });
+  }, [containerWidth, ready]);
 
   // after layout recomputes from the width change, snap to that page
   React.useLayoutEffect(() => {
@@ -310,11 +313,17 @@ export function PdfViewer({
   };
 
   // ---- Ctrl+scroll = smooth zoom anchored at the cursor ----
+  // IMPORTANT: the non-passive wheel listener is attached to WINDOW, not to
+  // the scroll container. A non-passive listener on the scroll element
+  // forces the browser to run it before every native scroll → blocks/
+  // janks touchpad scrolling. By putting it on window and checking whether
+  // the cursor is over our viewer, normal scrolling is completely unimpeded
+  // and only ctrl+scroll is intercepted.
   React.useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
     const handler = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
+      const el = scrollRef.current;
+      if (!el || !el.contains(e.target as Node)) return;
       e.preventDefault();
       if (!containerWidth) return;
       // gentler factor so each wheel tick is a small step, not a big jump
@@ -324,8 +333,8 @@ export function PdfViewer({
       const rect = el.getBoundingClientRect();
       applyZoomAnchored(next, e.clientY - rect.top);
     };
-    el.addEventListener("wheel", handler, { passive: false });
-    return () => el.removeEventListener("wheel", handler);
+    window.addEventListener("wheel", handler, { passive: false });
+    return () => window.removeEventListener("wheel", handler);
   }, [zoom, containerWidth]);
 
   // ---- drag pan (middle-click OR right-click, per settings) ----
@@ -459,7 +468,7 @@ export function PdfViewer({
                   transform: `translateY(${top}px)`,
                   height,
                   willChange: "transform",
-                  contain: "layout style paint",
+                  contain: "layout style",
                 }}
               >
                 <div
