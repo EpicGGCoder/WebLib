@@ -21,7 +21,7 @@ interface PdfViewerProps {
   onStateChange: (state: { page: number; zoom: number; scroll: number }) => void;
 }
 
-const RENDER_WINDOW = 3;
+const RENDER_WINDOW = 5;
 const PAGE_GAP = 12;
 
 export function PdfViewer({
@@ -142,6 +142,40 @@ export function PdfViewer({
     currentPageRef.current = currentPage;
     zoomRef.current = zoom;
   });
+
+  // ---- preserve current page when the container resizes (split drag) ----
+  // When containerWidth changes, page heights recompute (they're width-
+  // dependent), so the same scrollTop points to a different page. We record
+  // the page the user was on, then after layout recomputes, snap scrollTop
+  // to that page's new offset so the view stays on the same page.
+  const prevWidthRef = React.useRef(0);
+  const keepPageRef = React.useRef<number | null>(null);
+
+  React.useLayoutEffect(() => {
+    if (
+      prevWidthRef.current > 0 &&
+      prevWidthRef.current !== containerWidth &&
+      ready
+    ) {
+      // width changed — preserve the page the user was on
+      // (currentPageRef holds the value from the previous render = before
+      //  the width change, which is exactly what we want)
+      keepPageRef.current = currentPageRef.current;
+    }
+    prevWidthRef.current = containerWidth;
+  });
+
+  // after layout recomputes from the width change, snap to that page
+  React.useLayoutEffect(() => {
+    if (keepPageRef.current == null || !ready || !scrollRef.current) return;
+    const page = keepPageRef.current;
+    keepPageRef.current = null;
+    const newOffset = layout.offsets[page - 1];
+    if (newOffset != null) {
+      scrollRef.current.scrollTop = newOffset;
+      setScrollTop(newOffset);
+    }
+  }, [layout.offsets, ready]);
 
   // restore initial scroll position once layout is ready
   React.useEffect(() => {
@@ -409,6 +443,7 @@ export function PdfViewer({
                   transform: `translateY(${top}px)`,
                   height,
                   willChange: "transform",
+                  contain: "layout style paint",
                 }}
               >
                 <div
