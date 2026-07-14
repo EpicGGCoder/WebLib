@@ -1,9 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { Library, Search, BookMarked, Inbox } from "lucide-react";
+import { Library, Search, BookMarked, Inbox, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { UploadZone } from "./upload-zone";
+import { Button } from "@/components/ui/button";
+import { AddBooksDialog } from "./add-books-dialog";
 import { BookCard } from "./book-card";
 import { SavedSplits } from "./saved-splits";
 import {
@@ -20,9 +21,10 @@ import { cn } from "@/lib/utils";
 
 export function LibraryView() {
   const [books, setBooks] = React.useState<Book[]>([]);
-  const [splits, setSplits] = React.useState<Split[]>([]);
+   const [splits, setSplits] = React.useState<Split[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [query, setQuery] = React.useState("");
+  const [addOpen, setAddOpen] = React.useState(false);
   const libraryVersion = useAppStore((s) => s.libraryVersion);
   const openBookSolo = useAppStore((s) => s.openBookSolo);
   const setPaneCount = useAppStore((s) => s.setPaneCount);
@@ -135,11 +137,22 @@ export function LibraryView() {
               WebLib remembers every page.
             </p>
           </div>
-          <UploadZone variant="compact" onAdded={load} />
+          <Button
+            className="gap-2"
+            size="sm"
+            onClick={() => setAddOpen(true)}
+          >
+            <Plus className="size-4" />
+            Add book
+          </Button>
         </div>
-
-        <UploadZone onAdded={load} />
       </section>
+
+      <AddBooksDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onAdded={load}
+      />
 
       {/* Saved splits */}
       {!loading && splits.length > 0 && (
@@ -172,7 +185,7 @@ export function LibraryView() {
         </div>
       ) : filtered.length === 0 ? (
         books.length === 0 ? (
-          <EmptyState />
+          <EmptyState onAdd={() => setAddOpen(true)} />
         ) : (
           <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border py-16 text-center">
             <Inbox className="size-8 text-muted-foreground" />
@@ -200,7 +213,7 @@ export function LibraryView() {
   );
 }
 
-function EmptyState() {
+function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
     <div
       className={cn(
@@ -213,9 +226,13 @@ function EmptyState() {
       <div>
         <p className="font-display text-lg font-semibold">Your shelves are empty</p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Link your first PDF above to start building your library.
+          Link a PDF — or a whole folder of them — to start your library.
         </p>
       </div>
+      <Button className="mt-1 gap-2" onClick={onAdd}>
+        <Plus className="size-4" />
+        Add book
+      </Button>
     </div>
   );
 }

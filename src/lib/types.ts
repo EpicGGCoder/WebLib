@@ -9,10 +9,20 @@ export interface Book {
   addedAt: number;
   lastOpenedAt: number;
   hue: number;
-  // how the file is referenced: 'handle' = File System Access handle
+  // how the file is referenced: 'handle' = File System Access file handle
   // (reads from disk on demand, no copy); 'blob' = copied into IndexedDB
   // (fallback for browsers without the File System Access API)
   source: "handle" | "blob";
+  // if this book came from a linked folder, the folder id + filename within it
+  folderId?: string;
+  fileName?: string;
+}
+
+/** A linked folder on disk. The handle lives in the `folders` file store. */
+export interface Folder {
+  id: string;
+  name: string;
+  addedAt: number;
 }
 
 /** One slot inside a saved split layout. */

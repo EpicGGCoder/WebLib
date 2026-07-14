@@ -58,4 +58,4 @@ worklog.md
 
 # SQLite databases (keep schema in prisma/, ignore the binary db files)
 db/*.db
-db/*.db-journal
+db/*.db-journal.zscripts/

@@ -1,10 +1,11 @@
-import type { Book, Split } from "./types";
+import type { Book, Folder, Split } from "./types";
 
 const DB_NAME = "weblib-db";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const META_STORE = "books";
 const FILE_STORE = "files";
 const SPLIT_STORE = "splits";
+const FOLDER_STORE = "folders";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -26,8 +27,12 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(SPLIT_STORE)) {
         db.createObjectStore(SPLIT_STORE, { keyPath: "id" });
       }
-      // v1->v3: books + files stores already existed; splits added in v3.
-      // No structural migration needed for existing entries.
+      if (!db.objectStoreNames.contains(FOLDER_STORE)) {
+        // folders metadata (id, name, addedAt). The directory handle itself
+        // is stored in FILE_STORE under the same id for uniformity.
+        db.createObjectStore(FOLDER_STORE, { keyPath: "id" });
+      }
+      // v1->v4: books + files + splits; folders added in v4.
       if (e.oldVersion < 1) {
         // first install
       }
@@ -95,14 +100,18 @@ export function isHandle(entry: unknown): entry is FileSystemFileHandle {
 
 export type PermissionState = "granted" | "denied" | "prompt" | "unknown";
 
+// Accept any handle with the permission API (file OR directory handles).
+type AnyHandle = {
+  getFile?: () => Promise<File>;
+  queryPermission: (opts: { mode: string }) => Promise<string>;
+  requestPermission: (opts: { mode: string }) => Promise<string>;
+};
+
 export async function queryReadPermission(
-  handle: FileSystemFileHandle
+  handle: AnyHandle
 ): Promise<PermissionState> {
   try {
-    const h = handle as unknown as {
-      queryPermission: (opts: { mode: string }) => Promise<string>;
-    };
-    const res = await h.queryPermission({ mode: "read" });
+    const res = await handle.queryPermission({ mode: "read" });
     return (res as PermissionState) ?? "unknown";
   } catch {
     return "unknown";
@@ -110,13 +119,10 @@ export async function queryReadPermission(
 }
 
 export async function requestReadPermission(
-  handle: FileSystemFileHandle
+  handle: AnyHandle
 ): Promise<PermissionState> {
   try {
-    const h = handle as unknown as {
-      requestPermission: (opts: { mode: string }) => Promise<string>;
-    };
-    const res = await h.requestPermission({ mode: "read" });
+    const res = await handle.requestPermission({ mode: "read" });
     return (res as PermissionState) ?? "unknown";
   } catch {
     return "denied";
@@ -161,6 +167,131 @@ export async function resolveFile(
     return { ok: true, file, source: "blob" };
   }
   return { ok: false, reason: "not-found", source: "blob" };
+}
+
+// ---------------------------------------------------------------------------
+// Folder-linked books
+// ---------------------------------------------------------------------------
+
+type DirHandle = {
+  kind: "directory";
+  name: string;
+  queryPermission: (opts: { mode: string }) => Promise<string>;
+  requestPermission: (opts: { mode: string }) => Promise<string>;
+  getFileHandle: (name: string) => Promise<FileSystemFileHandle>;
+  entries: () => AsyncIterable<[string, FileSystemHandle]>;
+};
+
+function isDirHandle(h: unknown): h is DirHandle {
+  if (!h) return false;
+  const e = h as DirHandle;
+  return e.kind === "directory" && typeof e.getFileHandle === "function";
+}
+
+/** Open the native directory picker (Chrome/Edge). Throws if unsupported. */
+export async function pickFolder(): Promise<DirHandle> {
+  const w = window as unknown as {
+    showDirectoryPicker: (opts: {
+      mode?: string;
+    }) => Promise<DirHandle>;
+  };
+  if (typeof w.showDirectoryPicker !== "function") {
+    throw new Error("Directory picking is not supported in this browser");
+  }
+  return w.showDirectoryPicker({ mode: "read" });
+}
+
+/** List PDF filenames directly inside a directory (non-recursive). */
+export async function listPdfFilesInDir(
+  dir: DirHandle
+): Promise<string[]> {
+  const names: string[] = [];
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind === "file" && /\.pdf$/i.test(name)) {
+      names.push(name);
+    }
+  }
+  names.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return names;
+}
+
+export async function getAllFolders(): Promise<Folder[]> {
+  const folders = await tx<Folder[]>(FOLDER_STORE, "readonly", (s) => s.getAll());
+  return folders.sort((a, b) => b.addedAt - a.addedAt);
+}
+
+export async function getFolderMeta(id: string): Promise<Folder | undefined> {
+  return tx<Folder | undefined>(FOLDER_STORE, "readonly", (s) => s.get(id));
+}
+
+export async function getFolderHandle(
+  id: string
+): Promise<DirHandle | undefined> {
+  return tx<DirHandle | undefined>(FILE_STORE, "readonly", (s) => s.get(id));
+}
+
+export async function saveFolder(
+  folder: Folder,
+  dirHandle: DirHandle
+): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction([FOLDER_STORE, FILE_STORE], "readwrite");
+    t.objectStore(FOLDER_STORE).put(folder);
+    t.objectStore(FILE_STORE).put(dirHandle, folder.id);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+  });
+}
+
+export async function deleteFolder(id: string): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction([FOLDER_STORE, FILE_STORE], "readwrite");
+    t.objectStore(FOLDER_STORE).delete(id);
+    t.objectStore(FILE_STORE).delete(id);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+  });
+}
+
+/**
+ * Resolve a book to a File, handling both individually-linked files and
+ * folder-linked books. For folder books, permission is requested on the
+ * DIRECTORY handle (one prompt per folder per session), then the file is
+ * accessed via dirHandle.getFileHandle(fileName).
+ */
+export async function resolveBookFile(
+  book: Book,
+  opts: { autoPrompt?: boolean } = {}
+): Promise<ResolvedFile> {
+  // folder-linked book
+  if (book.folderId && book.fileName) {
+    const dir = await getFolderHandle(book.folderId);
+    if (!dir) {
+      return { ok: false, reason: "not-found", source: "handle" };
+    }
+    let perm = await queryReadPermission(dir);
+    if (perm !== "granted" && opts.autoPrompt) {
+      perm = await requestReadPermission(dir);
+    }
+    if (perm !== "granted") {
+      return { ok: false, reason: "permission-denied", source: "handle" };
+    }
+    try {
+      const fh = await dir.getFileHandle(book.fileName);
+      const file = await fh.getFile();
+      return { ok: true, file, source: "handle" };
+    } catch {
+      return { ok: false, reason: "not-found", source: "handle" };
+    }
+  }
+  // individually-linked file (handle) or blob fallback
+  const entry = await getFileEntry(book.id);
+  if (!entry) {
+    return { ok: false, reason: "not-found", source: "blob" };
+  }
+  return resolveFile(entry, opts);
 }
 
 export async function saveBook(

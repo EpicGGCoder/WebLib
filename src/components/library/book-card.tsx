@@ -9,6 +9,7 @@ import {
   Clock,
   FileText,
   HardDrive,
+  FolderOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -70,11 +71,23 @@ export function BookCard({
               )}
               {book.source === "handle" && (
                 <span
-                  className="flex items-center gap-1 rounded-md bg-emerald-400/30 px-1.5 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm"
-                  title="Reads from your disk — no copy"
+                  className={
+                    book.folderId
+                      ? "flex items-center gap-1 rounded-md bg-sky-400/30 px-1.5 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm"
+                      : "flex items-center gap-1 rounded-md bg-emerald-400/30 px-1.5 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm"
+                  }
+                  title={
+                    book.folderId
+                      ? "Linked from a folder — reads from your disk, no copy"
+                      : "Reads from your disk — no copy"
+                  }
                 >
-                  <HardDrive className="size-2.5" />
-                  linked
+                  {book.folderId ? (
+                    <FolderOpen className="size-2.5" />
+                  ) : (
+                    <HardDrive className="size-2.5" />
+                  )}
+                  {book.folderId ? "folder" : "linked"}
                 </span>
               )}
             </div>
