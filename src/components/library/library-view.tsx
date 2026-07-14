@@ -52,15 +52,17 @@ export function LibraryView() {
   const handleAddToSplit = React.useCallback(
     async (id: string) => {
       let target = panes.findIndex((p) => !p.bookId);
-      const initialPage = (await getBook(id))?.lastPage ?? 1;
+      const b = await getBook(id);
+      const initialPage = b?.lastPage ?? 1;
+      const initialZoom = b?.lastZoom ?? 1;
+      const initialScroll = b?.lastScroll ?? 0;
       if (target === -1) target = Math.max(0, paneCount - 1);
       if (paneCount < 2) {
         setPaneCount(2);
         target = Math.min(target, 1);
       }
-      // opening a split from the library is an ad-hoc (unsaved) layout
       setActiveSplit(null, null);
-      setPaneBook(target, id, initialPage);
+      setPaneBook(target, id, initialPage, initialZoom, initialScroll);
       setView("reader");
       void updateBook(id, { lastOpenedAt: Date.now() }).then(load);
     },
@@ -78,7 +80,12 @@ export function LibraryView() {
   const handleOpen = React.useCallback(
     async (id: string) => {
       const b = await getBook(id);
-      openBookSolo(id, b?.lastPage ?? 1);
+      openBookSolo(
+        id,
+        b?.lastPage ?? 1,
+        b?.lastZoom ?? 1,
+        b?.lastScroll ?? 0
+      );
       void updateBook(id, { lastOpenedAt: Date.now() }).then(load);
     },
     [openBookSolo, load]

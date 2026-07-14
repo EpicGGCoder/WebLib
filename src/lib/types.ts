@@ -4,6 +4,8 @@ export interface Book {
   size: number;
   pages: number; // best-effort total page count (0 if unknown)
   lastPage: number; // last saved page when opened SOLO (1-based)
+  lastZoom: number; // last saved zoom when opened SOLO (1.0 = fit-width)
+  lastScroll: number; // last saved scroll position (px) when opened SOLO
   addedAt: number;
   lastOpenedAt: number;
   hue: number;
@@ -17,6 +19,8 @@ export interface Book {
 export interface SplitPane {
   bookId: string;
   page: number; // this pane's own remembered page (1-based)
+  zoom: number; // this pane's own remembered zoom (1.0 = fit-width)
+  scroll: number; // this pane's own remembered scroll position (px)
 }
 
 /** A saved multi-pane layout the user can reopen from the home screen. */

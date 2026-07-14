@@ -1,21 +1,17 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import {
   X,
-  CornerDownRight,
   ArrowLeftRight,
   Loader2,
   FileWarning,
-  RotateCw,
   ShieldCheck,
   Unplug,
   RefreshCw,
-  Minus,
-  Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   getBook,
   getFileEntry,
@@ -23,6 +19,7 @@ import {
   saveBook,
   updateBook,
   updateSplit,
+  getSplit,
   isFileSystemAccessSupported,
   pickPdfHandles,
   isHandle,
@@ -33,10 +30,18 @@ import { useAppStore } from "@/lib/use-store";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
+// pdf.js viewer is client-only (canvas, IntersectionObserver).
+const PdfViewer = dynamic(
+  () => import("./pdf-viewer").then((m) => m.PdfViewer),
+  { ssr: false }
+);
+
 interface PdfPaneProps {
   bookId: string;
   paneIndex: number;
   page: number; // this pane's current remembered page
+  zoom: number; // this pane's current remembered zoom
+  scroll: number; // this pane's current remembered scroll
   activeSplitId: string | null;
   onClose: () => void;
   onChangeBook: () => void;
@@ -50,52 +55,28 @@ type PaneStatus =
   | "not-found"
   | "error";
 
-function clampInt(v: string, min: number, max: number): number {
-  const n = parseInt(v, 10);
-  if (Number.isNaN(n)) return min;
-  return Math.max(min, Math.min(max, n));
-}
-
 export function PdfPane({
   bookId,
   paneIndex,
   page,
+  zoom,
+  scroll,
   activeSplitId,
   onClose,
   onChangeBook,
 }: PdfPaneProps) {
   const setPanePage = useAppStore((s) => s.setPanePage);
+  const setPaneZoom = useAppStore((s) => s.setPaneZoom);
+  const setPaneScroll = useAppStore((s) => s.setPaneScroll);
   const [book, setBook] = React.useState<Book | null>(null);
-  const [url, setUrl] = React.useState<string | null>(null);
-  const [pageInput, setPageInput] = React.useState(String(page));
-  // displayPage = the page the iframe is actually rendering. Only changes on
-  // an explicit jump (gotoAndRemember) or a full book load — NOT on a bookmark
-  // nudge, so +/- can update the bookmark without reloading the PDF.
-  const [displayPage, setDisplayPage] = React.useState(page);
-  const [reloadKey, setReloadKey] = React.useState(0);
+  const [file, setFile] = React.useState<Blob | null>(null);
   const [status, setStatus] = React.useState<PaneStatus>("loading");
-
-  // ref to the current bookmarked page so loadBook (keyed on bookId only)
-  // can read the fresh value without re-creating on every page change.
-  const pageRef = React.useRef(page);
-  pageRef.current = page;
-
-  // keep the box in sync when the pane's bookmarked page changes externally
-  // (e.g. loading a saved split). We intentionally do NOT touch displayPage
-  // here — the iframe should only (re)render at its page on a real jump or
-  // initial load, otherwise nudging the bookmark would reload the viewer.
-  React.useEffect(() => {
-    setPageInput(String(page));
-  }, [page]);
+  const [reloadKey, setReloadKey] = React.useState(0);
 
   const loadBook = React.useCallback(async () => {
     setStatus("loading");
     setBook(null);
-    setUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-
+    setFile(null);
     try {
       const b = await getBook(bookId);
       if (!b) {
@@ -103,23 +84,15 @@ export function PdfPane({
         return;
       }
       setBook(b);
-
       const entry = await getFileEntry(bookId);
       if (!entry) {
         setStatus("not-found");
         return;
       }
-
       const isHandleEntry = isHandle(entry);
       const result = await resolveFile(entry, { autoPrompt: false });
-
       if (result.ok) {
-        const u = URL.createObjectURL(result.file);
-        setUrl(u);
-        // render the iframe at this pane's bookmarked page on (re)load
-        const initialPage = pageRef.current;
-        setDisplayPage(initialPage);
-        setPageInput(String(initialPage));
+        setFile(result.file);
         setReloadKey((k) => k + 1);
         setStatus("ready");
         void updateBook(b.id, { lastOpenedAt: Date.now() });
@@ -140,15 +113,6 @@ export function PdfPane({
     void loadBook();
   }, [loadBook]);
 
-  React.useEffect(() => {
-    return () => {
-      setUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return null;
-      });
-    };
-  }, []);
-
   const grantPermission = async () => {
     try {
       const entry = await getFileEntry(bookId);
@@ -158,8 +122,7 @@ export function PdfPane({
       }
       const result = await resolveFile(entry, { autoPrompt: true });
       if (result.ok) {
-        const u = URL.createObjectURL(result.file);
-        setUrl(u);
+        setFile(result.file);
         setReloadKey((k) => k + 1);
         setStatus("ready");
         void updateBook(bookId, { lastOpenedAt: Date.now() });
@@ -183,12 +146,12 @@ export function PdfPane({
       const handles = await pickPdfHandles();
       if (!handles[0]) return;
       const handle = handles[0];
-      const file = await handle.getFile();
+      const f = await handle.getFile();
       const patch: Partial<Book> = {
-        size: file.size,
-        name: book?.name ?? file.name.replace(/\.pdf$/i, ""),
+        size: f.size,
+        name: book?.name ?? f.name.replace(/\.pdf$/i, ""),
       };
-      const pages = await countPdfPages(file);
+      const pages = await countPdfPages(f);
       if (pages > 0) patch.pages = pages;
       await saveBook({ ...(book as Book), ...patch } as Book, handle);
       await updateBook(bookId, patch);
@@ -204,21 +167,28 @@ export function PdfPane({
   };
 
   /**
-   * Persist a page number as this pane's bookmark (and mirror it into the
-   * saved split's pane, or the book's solo bookmark). Shared by the jump
-   * action and the +/− nudge buttons.
+   * Auto-persist page + zoom + scroll for this pane. Called (debounced) by
+   * the pdf.js viewer on scroll/zoom. Mirrors into the active saved split's
+   * pane, or the book's solo bookmark when reading solo.
    */
-  const persistPage = React.useCallback(
-    async (n: number) => {
-      if (!book) return;
-      setPanePage(paneIndex, n);
+  const handleStateChange = React.useCallback(
+    async (state: { page: number; zoom: number; scroll: number }) => {
+      setPanePage(paneIndex, state.page);
+      setPaneZoom(paneIndex, state.zoom);
+      setPaneScroll(paneIndex, state.scroll);
       if (activeSplitId) {
         try {
-          const { getSplit } = await import("@/lib/pdf-store");
           const split = await getSplit(activeSplitId);
           if (split) {
             const panes = split.panes.map((p, i) =>
-              i === paneIndex ? { ...p, page: n } : p
+              i === paneIndex
+                ? {
+                    ...p,
+                    page: state.page,
+                    zoom: state.zoom,
+                    scroll: state.scroll,
+                  }
+                : p
             );
             await updateSplit(activeSplitId, {
               panes,
@@ -229,53 +199,24 @@ export function PdfPane({
           /* ignore */
         }
       } else {
-        // ad-hoc (unsaved) session: only mirror into the book's solo
-        // bookmark when this is a true single-pane solo read, so that
-        // having the same book open in multiple panes doesn't clobber it.
         const st = useAppStore.getState();
         const filledPanes = st.panes.filter((p) => p.bookId);
         const isSolo = filledPanes.length === 1;
-        if (isSolo) {
+        if (isSolo && book) {
           try {
-            await updateBook(book.id, { lastPage: n });
-            setBook({ ...book, lastPage: n });
+            await updateBook(book.id, {
+              lastPage: state.page,
+              lastZoom: state.zoom,
+              lastScroll: state.scroll,
+            });
           } catch {
             /* ignore */
           }
         }
       }
     },
-    [book, paneIndex, activeSplitId, setPanePage]
+    [paneIndex, activeSplitId, setPanePage, setPaneZoom, setPaneScroll, book]
   );
-
-  /**
-   * Jump the viewer to the typed page AND remember it for this pane.
-   * (Chrome's native viewer can't report its own page back to us, so this
-   * one keystroke is the smoothest way to both jump + bookmark.)
-   */
-  const gotoAndRemember = async () => {
-    if (!book) return;
-    const max = book.pages > 0 ? book.pages : 999999;
-    const n = clampInt(pageInput, 1, max);
-    setPageInput(String(n));
-    setDisplayPage(n);
-    setReloadKey((k) => k + 1);
-    await persistPage(n);
-  };
-
-  /**
-   * Nudge the bookmarked page by +/-1 WITHOUT reloading the viewer. Use this
-   * when you've scrolled in the native viewer and want to update the bookmark
-   * to roughly where you are now — no typing, no PDF reload.
-   */
-  const nudgeBookmark = async (delta: number) => {
-    if (!book) return;
-    const max = book.pages > 0 ? book.pages : 999999;
-    const current = clampInt(pageInput, 1, max);
-    const n = clampInt(String(current + delta), 1, max);
-    setPageInput(String(n));
-    await persistPage(n);
-  };
 
   const reload = () => setReloadKey((k) => k + 1);
 
@@ -298,68 +239,7 @@ export function PdfPane({
             linked
           </span>
         )}
-
-        {/* Page controls: [−] p.[box] /N [+] [↪go]
-            − / + : nudge the bookmark without reloading the viewer
-            Enter / ↪ : jump the viewer to the typed page AND bookmark it */}
-        <div className="flex items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 text-muted-foreground"
-            onClick={() => void nudgeBookmark(-1)}
-            title="Bookmark previous page (no viewer reload)"
-            disabled={status !== "ready"}
-          >
-            <Minus className="size-3" />
-          </Button>
-          <span className="text-[10px] text-muted-foreground">p.</span>
-          <Input
-            value={pageInput}
-            onChange={(e) =>
-              setPageInput(e.target.value.replace(/[^0-9]/g, ""))
-            }
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void gotoAndRemember();
-              }
-            }}
-            inputMode="numeric"
-            className="h-6 w-10 px-1 text-center text-xs tabular-nums"
-            aria-label={`Page for ${book?.name ?? "book"}`}
-            title="Type the page you're on and press Enter — jumps there and remembers it. Or use − / + to nudge the bookmark."
-            disabled={status !== "ready"}
-          />
-          {book && book.pages > 0 && (
-            <span className="hidden text-[10px] text-muted-foreground tabular-nums sm:inline">
-              /{book.pages}
-            </span>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 text-muted-foreground"
-            onClick={() => void nudgeBookmark(1)}
-            title="Bookmark next page (no viewer reload)"
-            disabled={status !== "ready"}
-          >
-            <Plus className="size-3" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 text-muted-foreground"
-            onClick={() => void gotoAndRemember()}
-            title="Jump to this page & remember it (Enter)"
-            disabled={status !== "ready"}
-          >
-            <CornerDownRight className="size-3" />
-          </Button>
-        </div>
-
         <div className="mx-0.5 h-4 w-px bg-border" />
-
         <Button
           variant="ghost"
           size="icon"
@@ -368,7 +248,7 @@ export function PdfPane({
           title="Reload viewer"
           disabled={status !== "ready"}
         >
-          <RotateCw className="size-3" />
+          <RefreshCw className="size-3" />
         </Button>
         <Button
           variant="ghost"
@@ -391,122 +271,146 @@ export function PdfPane({
         </Button>
       </div>
 
-      {/* Viewer body — gets all remaining vertical space */}
+      {/* Viewer body */}
       <div className="relative min-h-0 flex-1 bg-muted/30">
         {status === "loading" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-neutral-200/50 dark:bg-neutral-900/50">
             <Loader2 className="size-7 animate-spin text-primary" />
-            <p className="text-sm">Opening book…</p>
+            <p className="text-sm text-muted-foreground">Opening book…</p>
           </div>
         )}
-
         {status === "needs-permission" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-              <ShieldCheck className="size-6" />
-            </div>
-            <div>
-              <p className="font-medium">Allow WebLib to read this file</p>
-              <p className="mt-1 max-w-xs text-sm text-muted-foreground">
-                Your browser asks once per session for each linked file. WebLib
-                reads it straight from your disk — nothing is uploaded.
-              </p>
-            </div>
-            <Button onClick={() => void grantPermission()} className="gap-2">
-              <ShieldCheck className="size-4" />
-              Allow access to &ldquo;{book?.name}&rdquo;
-            </Button>
-          </div>
+          <CenterMessage
+            icon={<ShieldCheck className="size-6" />}
+            tint="primary"
+            title="Allow WebLib to read this file"
+            body="Your browser asks once per session for each linked file. WebLib reads it straight from your disk — nothing is uploaded."
+            action={
+              <Button onClick={() => void grantPermission()} className="gap-2">
+                <ShieldCheck className="size-4" />
+                Allow access to &ldquo;{book?.name}&rdquo;
+              </Button>
+            }
+          />
         )}
-
         {status === "permission-denied" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
-              <ShieldCheck className="size-6" />
-            </div>
-            <div>
-              <p className="font-medium">Access was blocked</p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                You can retry — your browser will ask again.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void grantPermission()}
-              className="gap-2"
-            >
-              <RefreshCw className="size-4" />
-              Retry access
-            </Button>
-          </div>
+          <CenterMessage
+            icon={<ShieldCheck className="size-6" />}
+            tint="destructive"
+            title="Access was blocked"
+            body="You can retry — your browser will ask again."
+            action={
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void grantPermission()}
+                className="gap-2"
+              >
+                <RefreshCw className="size-4" />
+                Retry access
+              </Button>
+            }
+          />
         )}
-
         {status === "not-found" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
-              <Unplug className="size-6" />
-            </div>
-            <div>
-              <p className="font-medium">Can&apos;t find this file on disk</p>
-              <p className="mt-1 max-w-xs text-sm text-muted-foreground">
-                It may have been moved, renamed, or deleted. Re-link it to a new
-                location and your bookmarks stay intact.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void reLink()}
-              className="gap-2"
-            >
-              <Unplug className="size-4" />
-              Re-link file
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onChangeBook}
-              className="gap-2 text-muted-foreground"
-            >
-              <ArrowLeftRight className="size-4" />
-              Choose another book
-            </Button>
-          </div>
+          <CenterMessage
+            icon={<Unplug className="size-6" />}
+            tint="amber"
+            title="Can't find this file on disk"
+            body="It may have been moved, renamed, or deleted. Re-link it to a new location and your bookmarks stay intact."
+            action={
+              <div className="flex flex-col items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void reLink()}
+                  className="gap-2"
+                >
+                  <Unplug className="size-4" />
+                  Re-link file
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onChangeBook}
+                  className="gap-2 text-muted-foreground"
+                >
+                  <ArrowLeftRight className="size-4" />
+                  Choose another book
+                </Button>
+              </div>
+            }
+          />
         )}
-
         {status === "error" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
-              <FileWarning className="size-6" />
-            </div>
-            <div>
-              <p className="font-medium">Couldn&apos;t open this book</p>
-              <p className="text-sm text-muted-foreground">
-                It may have been removed from your library.
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onChangeBook}
-              className="gap-2"
-            >
-              <ArrowLeftRight className="size-4" />
-              Choose another book
-            </Button>
-          </div>
+          <CenterMessage
+            icon={<FileWarning className="size-6" />}
+            tint="destructive"
+            title="Couldn't open this book"
+            body="It may have been removed from your library."
+            action={
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onChangeBook}
+                className="gap-2"
+              >
+                <ArrowLeftRight className="size-4" />
+                Choose another book
+              </Button>
+            }
+          />
         )}
-
-        {status === "ready" && url && (
-          <iframe
+        {status === "ready" && file && (
+          <PdfViewer
             key={reloadKey}
-            src={`${url}#page=${displayPage}&toolbar=1&navpanes=1&view=FitH`}
-            title={book?.name ?? "PDF viewer"}
-            className={cn("absolute inset-0 h-full w-full border-0 bg-white")}
+            file={file}
+            initialPage={page}
+            initialZoom={zoom}
+            initialScroll={scroll}
+            numPages={book?.pages ?? 0}
+            onStateChange={(s) => void handleStateChange(s)}
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function CenterMessage({
+  icon,
+  title,
+  body,
+  action,
+  tint,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  body: string;
+  action: React.ReactNode;
+  tint: "primary" | "destructive" | "amber";
+}) {
+  const tintCls =
+    tint === "primary"
+      ? "bg-primary/10 text-primary"
+      : tint === "destructive"
+        ? "bg-destructive/10 text-destructive"
+        : "bg-amber-500/10 text-amber-600 dark:text-amber-400";
+  return (
+    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 p-6 text-center">
+      <div
+        className={cn(
+          "flex size-12 items-center justify-center rounded-2xl",
+          tintCls
+        )}
+      >
+        {icon}
+      </div>
+      <div>
+        <p className="font-medium">{title}</p>
+        <p className="mt-1 max-w-xs text-sm text-muted-foreground">{body}</p>
+      </div>
+      {action}
     </div>
   );
 }

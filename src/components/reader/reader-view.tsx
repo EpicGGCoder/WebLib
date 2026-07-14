@@ -98,7 +98,12 @@ export function ReaderView() {
       if (!activeSplitId) return;
       const splitPanes: SplitPane[] = nextPanes
         .filter((p) => p.bookId)
-        .map((p) => ({ bookId: p.bookId as string, page: p.page }));
+        .map((p) => ({
+          bookId: p.bookId as string,
+          page: p.page,
+          zoom: p.zoom,
+          scroll: p.scroll,
+        }));
       try {
         await updateSplit(activeSplitId, {
           panes: splitPanes,
@@ -114,15 +119,21 @@ export function ReaderView() {
   const handleSetPaneBook = React.useCallback(
     async (index: number, bookId: string | null) => {
       let initialPage = 1;
+      let initialZoom = 1;
+      let initialScroll = 0;
       if (bookId) {
         try {
           const b = await getBook(bookId);
-          if (b) initialPage = b.lastPage;
+          if (b) {
+            initialPage = b.lastPage;
+            initialZoom = b.lastZoom ?? 1;
+            initialScroll = b.lastScroll ?? 0;
+          }
         } catch {
           /* ignore */
         }
       }
-      setPaneBook(index, bookId, initialPage);
+      setPaneBook(index, bookId, initialPage, initialZoom, initialScroll);
       // sync after state update
       setTimeout(() => {
         const latest = useAppStore.getState().panes;
@@ -172,7 +183,12 @@ export function ReaderView() {
     const name = splitName.trim() || "Untitled split";
     const splitPanes: SplitPane[] = panes
       .filter((p) => p.bookId)
-      .map((p) => ({ bookId: p.bookId as string, page: p.page }));
+      .map((p) => ({
+        bookId: p.bookId as string,
+        page: p.page,
+        zoom: p.zoom,
+        scroll: p.scroll,
+      }));
     if (splitPanes.length === 0) {
       toast.error("Add a book to a pane first");
       return;
@@ -292,6 +308,8 @@ export function ReaderView() {
                     bookId={pane.bookId}
                     paneIndex={i}
                     page={pane.page}
+                    zoom={pane.zoom}
+                    scroll={pane.scroll}
                     activeSplitId={activeSplitId}
                     onClose={() => handleClosePane(i)}
                     onChangeBook={() => handleSetPaneBook(i, null)}
