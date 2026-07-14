@@ -18,6 +18,7 @@ interface PdfViewerProps {
   initialZoom: number; // 1.0 = fit-width
   initialScroll: number; // px
   numPages: number; // total (from metadata; 0 if unknown)
+  panButton: "middle" | "right";
   onStateChange: (state: { page: number; zoom: number; scroll: number }) => void;
 }
 
@@ -30,6 +31,7 @@ export function PdfViewer({
   initialZoom,
   initialScroll,
   numPages,
+  panButton,
   onStateChange,
 }: PdfViewerProps) {
   // guard against NaN/undefined from older persisted state
@@ -326,7 +328,7 @@ export function PdfViewer({
     return () => el.removeEventListener("wheel", handler);
   }, [zoom, containerWidth]);
 
-  // ---- middle-click drag pan ----
+  // ---- drag pan (middle-click OR right-click, per settings) ----
   const [panning, setPanning] = React.useState(false);
   const panStateRef = React.useRef<{
     panning: boolean;
@@ -336,8 +338,11 @@ export function PdfViewer({
     scrollTop: number;
   }>({ panning: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 });
 
+  // which button triggers pan: 1 = middle, 2 = right
+  const panButtonCode = panButton === "right" ? 2 : 1;
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 1) return;
+    if (e.button !== panButtonCode) return;
     const el = scrollRef.current;
     if (!el) return;
     e.preventDefault();
@@ -370,6 +375,17 @@ export function PdfViewer({
       /* ignore */
     }
   };
+
+  // when right-click pan is enabled, suppress the browser context menu on the
+  // viewer so dragging doesn't pop up the menu.
+  React.useEffect(() => {
+    if (panButton !== "right") return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const onCtx = (e: Event) => e.preventDefault();
+    el.addEventListener("contextmenu", onCtx);
+    return () => el.removeEventListener("contextmenu", onCtx);
+  }, [panButton]);
 
   // ---- page jump ----
   const [pageInput, setPageInput] = React.useState(String(currentPage));

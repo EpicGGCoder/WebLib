@@ -27,6 +27,7 @@ import {
 } from "@/lib/pdf-store";
 import type { Book } from "@/lib/types";
 import { useAppStore } from "@/lib/use-store";
+import { usePanButton } from "@/components/reader/settings-dialog";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +69,7 @@ export function PdfPane({
   const setPanePage = useAppStore((s) => s.setPanePage);
   const setPaneZoom = useAppStore((s) => s.setPaneZoom);
   const setPaneScroll = useAppStore((s) => s.setPaneScroll);
+  const panButton = usePanButton();
   const [book, setBook] = React.useState<Book | null>(null);
   const [file, setFile] = React.useState<Blob | null>(null);
   const [status, setStatus] = React.useState<PaneStatus>("loading");
@@ -369,6 +371,7 @@ export function PdfPane({
             initialZoom={zoom}
             initialScroll={scroll}
             numPages={book?.pages ?? 0}
+            panButton={panButton}
             onStateChange={(s) => void handleStateChange(s)}
           />
         )}

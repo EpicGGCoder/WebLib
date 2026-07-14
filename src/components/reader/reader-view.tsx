@@ -14,6 +14,7 @@ import {
   Minimize,
   ChevronsDownUp,
   ChevronsUpDown,
+  Settings,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,6 +34,7 @@ import { useAppStore } from "@/lib/use-store";
 import { saveSplit, updateSplit, getBook } from "@/lib/pdf-store";
 import { PdfPane } from "./pdf-pane";
 import { PaneBookPicker } from "./pane-book-picker";
+import { SettingsDialog } from "./settings-dialog";
 import { cn } from "@/lib/utils";
 import type { Split, SplitPane } from "@/lib/types";
 import { toast } from "sonner";
@@ -59,6 +61,7 @@ export function ReaderView() {
   const [splitName, setSplitName] = React.useState("");
   const [isFullscreen, setIsFullscreen] = React.useState(false);
   const [topBarCollapsed, setTopBarCollapsed] = React.useState(false);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const rootRef = React.useRef<HTMLDivElement | null>(null);
 
   // track fullscreen state changes (esc key, etc.)
@@ -330,9 +333,20 @@ export function ReaderView() {
                 <Maximize className="size-4" />
               )}
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground"
+              onClick={() => setSettingsOpen(true)}
+              title="Settings"
+            >
+              <Settings className="size-4" />
+            </Button>
           </div>
         </header>
       )}
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       {/* Panes — fill all remaining height */}
       <div className="min-h-0 flex-1">
