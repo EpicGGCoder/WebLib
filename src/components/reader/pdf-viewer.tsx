@@ -178,37 +178,88 @@ export function PdfViewer({
     }, 400);
   };
 
-  const setZoomCentered = (next: number) => {
+  /**
+   * Zoom anchored to a specific screen point (cursor or viewport center).
+   * Keeps the document point under that screen point stationary, so the
+   * content doesn't drift up/down. Uses a layout effect to correct scroll
+   * synchronously before the browser paints (no flicker).
+   *
+   * Strategy: record (scrollTop, clientY) before zoom; after zoom the same
+   * document fraction is at fraction = oldScrollPos / oldScrollMax; but to
+   * anchor the CURSOR we need the document point under the cursor. We
+   * compute: docPointUnderCursor = scrollTop + (cursorY - 0) in document
+   * coords... actually simpler: the content scales by (next/zoom), so a
+   * document point at old offset `o` moves to `o * (next/zoom)`. We keep
+   * the point under the cursor fixed:
+   *   oldCursorDocY = scrollTop + cursorY
+   *   newScrollTop  = oldCursorDocY * (next/zoom) - cursorY
+   */
+  const anchorRef = React.useRef<{
+    zoom: number;
+    next: number;
+    cursorY: number | null; // null = viewport center
+    oldScrollTop: number;
+    oldScrollHeight: number;
+  } | null>(null);
+
+  const applyZoomAnchored = (
+    next: number,
+    cursorY: number | null
+  ) => {
     const el = scrollRef.current;
-    let ratio = 0.5;
-    if (el) {
-      const max = el.scrollHeight - el.clientHeight;
-      ratio = max > 0 ? el.scrollTop / max : 0.5;
+    if (!el) {
+      setZoom(next);
+      return;
     }
+    anchorRef.current = {
+      zoom,
+      next,
+      cursorY,
+      oldScrollTop: el.scrollTop,
+      oldScrollHeight: el.scrollHeight,
+    };
     setZoom(next);
-    requestAnimationFrame(() => {
-      if (el) {
-        const newMax = el.scrollHeight - el.clientHeight;
-        el.scrollTop = newMax * ratio;
-      }
-    });
+  };
+
+  // Synchronously correct scroll position after zoom state changes, before
+  // paint, so there's no visible flicker/jump.
+  React.useLayoutEffect(() => {
+    const a = anchorRef.current;
+    if (!a) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    anchorRef.current = null;
+    if (a.zoom === 0) return;
+    const scale = a.next / a.zoom;
+    const cursorY =
+      a.cursorY != null
+        ? a.cursorY
+        : el.clientHeight / 2;
+    // document point under the cursor before zoom
+    const docPoint = a.oldScrollTop + cursorY;
+    // after zoom that point is at docPoint * scale; set scrollTop so it's
+    // under the cursor again: scrollTop = docPoint*scale - cursorY
+    const target = Math.max(0, docPoint * scale - cursorY);
+    el.scrollTop = target;
+    setScrollTop(el.scrollTop);
     if (saveRef.current) clearTimeout(saveRef.current);
     saveRef.current = setTimeout(() => {
       onStateChange({
         page: currentPageRef.current,
-        zoom: next,
-        scroll: el?.scrollTop ?? 0,
+        zoom: a.next,
+        scroll: el.scrollTop,
       });
     }, 400);
-  };
+  }, [zoom, onStateChange]);
 
-  const zoomIn = () => setZoomCentered(Math.min(4, +(zoom + 0.25).toFixed(2)));
+  const zoomIn = () =>
+    applyZoomAnchored(Math.min(4, +(zoom + 0.25).toFixed(2)), null);
   const zoomOut = () =>
-    setZoomCentered(Math.max(0.25, +(zoom - 0.25).toFixed(2)));
-  const fitWidth = () => setZoomCentered(1);
+    applyZoomAnchored(Math.max(0.25, +(zoom - 0.25).toFixed(2)), null);
+  const fitWidth = () => applyZoomAnchored(1, null);
 
-  // ---- Ctrl+scroll = smooth zoom (anchored at cursor) ----
-  // Native non-passive wheel listener so preventDefault actually works.
+  // ---- Ctrl+scroll = smooth zoom anchored at the cursor ----
+  // Native non-passive listener so preventDefault stops browser page zoom.
   React.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -219,27 +270,13 @@ export function PdfViewer({
       const factor = Math.exp(-e.deltaY * 0.0015);
       const next = Math.max(0.25, Math.min(4, +(zoom * factor).toFixed(3)));
       if (next === zoom) return;
-      const ratioY =
-        el.scrollHeight > el.clientHeight
-          ? el.scrollTop / (el.scrollHeight - el.clientHeight)
-          : 0;
-      setZoom(next);
-      requestAnimationFrame(() => {
-        const newMaxY = el.scrollHeight - el.clientHeight;
-        el.scrollTop = newMaxY * ratioY;
-      });
-      if (saveRef.current) clearTimeout(saveRef.current);
-      saveRef.current = setTimeout(() => {
-        onStateChange({
-          page: currentPageRef.current,
-          zoom: next,
-          scroll: el.scrollTop,
-        });
-      }, 400);
+      const rect = el.getBoundingClientRect();
+      const cursorY = e.clientY - rect.top;
+      applyZoomAnchored(next, cursorY);
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, [zoom, containerWidth, onStateChange]);
+  }, [zoom, containerWidth]);
 
   // ---- middle-click drag pan (auto-scroll) ----
   const [panning, setPanning] = React.useState(false);
