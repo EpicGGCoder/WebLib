@@ -21,7 +21,7 @@ interface PdfViewerProps {
   onStateChange: (state: { page: number; zoom: number; scroll: number }) => void;
 }
 
-const RENDER_WINDOW = 2;
+const RENDER_WINDOW = 3;
 const PAGE_GAP = 12;
 
 export function PdfViewer({
@@ -166,18 +166,39 @@ export function PdfViewer({
     }
   }, [ready, safeScroll, safePage, layout.offsets]);
 
+  // rAF-batched scroll: touchpads fire 60–120 events/sec; without batching
+  // each one triggers a React re-render + visiblePages recompute → stutter.
+  // We coalesce all scroll events within a single animation frame into one
+  // state update, so the browser paints at its natural cadence.
+  const rafRef = React.useRef<number | null>(null);
+  const pendingScrollRef = React.useRef(0);
+
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const st = e.currentTarget.scrollTop;
-    setScrollTop(st);
+    pendingScrollRef.current = st;
+    // debounced save (unchanged)
     if (saveRef.current) clearTimeout(saveRef.current);
     saveRef.current = setTimeout(() => {
       onStateChange({
         page: currentPageRef.current,
         zoom: zoomRef.current,
-        scroll: st,
+        scroll: pendingScrollRef.current,
       });
     }, 400);
+    // schedule one state update per frame
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      setScrollTop(pendingScrollRef.current);
+    });
   };
+
+  // cancel any pending rAF on unmount
+  React.useEffect(() => {
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
 
   // ---- cursor-anchored zoom (synchronous, no flicker, no drift) ----
   // Because layout is deterministic, scrollHeight is correct immediately
@@ -384,7 +405,11 @@ export function PdfViewer({
               <div
                 key={pageNum}
                 className="absolute left-0 right-0 mx-auto"
-                style={{ top, height }}
+                style={{
+                  transform: `translateY(${top}px)`,
+                  height,
+                  willChange: "transform",
+                }}
               >
                 <div
                   className="relative mx-auto bg-white shadow-lg shadow-black/10"
