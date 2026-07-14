@@ -22,6 +22,7 @@ interface PdfViewerProps {
 }
 
 const RENDER_WINDOW = 2;
+const PAGE_GAP = 12;
 
 export function PdfViewer({
   file,
@@ -31,18 +32,21 @@ export function PdfViewer({
   numPages,
   onStateChange,
 }: PdfViewerProps) {
+  // guard against NaN/undefined from older persisted state
+  const safeZoom = Number.isFinite(initialZoom) && initialZoom > 0 ? initialZoom : 1;
+  const safePage = Number.isFinite(initialPage) && initialPage >= 1 ? initialPage : 1;
+  const safeScroll = Number.isFinite(initialScroll) ? initialScroll : 0;
+
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const [doc, setDoc] = React.useState<PdfDoc | null>(null);
-  const [pageWidths, setPageWidths] = React.useState<number[]>([]);
+  // deterministic per-page dimensions at scale 1 ({w, h}); fetched once on load
+  const [pageDims, setPageDims] = React.useState<{ w: number; h: number }[]>([]);
   const [containerWidth, setContainerWidth] = React.useState(0);
-  const [zoom, setZoom] = React.useState(initialZoom);
+  const [zoom, setZoom] = React.useState(safeZoom);
   const [scrollTop, setScrollTop] = React.useState(0);
   const [viewportH, setViewportH] = React.useState(0);
   const [ready, setReady] = React.useState(false);
-  const [realHeights, setRealHeights] = React.useState<Record<number, number>>(
-    {}
-  );
   const restoredRef = React.useRef(false);
   const saveRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -62,42 +66,40 @@ export function PdfViewer({
 
   const onDocLoad = async (d: PdfDoc) => {
     setDoc(d);
-    const widths = await Promise.all(
+    // fetch BOTH width and height at scale 1 for every page — this makes the
+    // layout fully deterministic at any zoom (no runtime measurement needed).
+    const dims = await Promise.all(
       Array.from({ length: d.numPages }, async (_, i) => {
         const page = await d.getPage(i + 1);
-        return page.getViewport({ scale: 1 }).width;
+        const vp = page.getViewport({ scale: 1 });
+        return { w: vp.width, h: vp.height };
       })
     );
-    setPageWidths(widths);
+    setPageDims(dims);
     setReady(true);
   };
 
-  // real page heights from rendered pages (state-driven so layout recomputes)
-  const registerPageHeight = React.useCallback((pageNum: number, h: number) => {
-    setRealHeights((prev) => {
-      if (prev[pageNum] === h) return prev;
-      return { ...prev, [pageNum]: h };
-    });
-  }, []);
-
-  // layout: per-page heights + offsets, using real heights when available
+  // Deterministic layout: at zoom Z, rendered width = containerWidth * Z,
+  // scale = renderedWidth / pageW1, rendered height = pageH1 * scale.
+  // The gap between pages also scales with zoom so the ENTIRE document
+  // height scales linearly — this makes cursor-anchored zoom exact.
+  // No measurement → no feedback loop → no drift on zoom.
   const layout = React.useMemo(() => {
-    if (!pageWidths.length || containerWidth === 0)
+    if (!pageDims.length || containerWidth === 0)
       return { heights: [] as number[], offsets: [] as number[], total: 0 };
-    const heights = pageWidths.map((w, i) => {
-      const real = realHeights[i + 1];
-      if (real) return real;
+    const gap = PAGE_GAP * zoom;
+    const heights = pageDims.map(({ w, h }) => {
       const scale = (containerWidth * zoom) / w;
-      return w * Math.SQRT2 * scale; // fallback aspect ratio
+      return h * scale;
     });
     const offsets: number[] = [];
     let acc = 0;
     for (const h of heights) {
       offsets.push(acc);
-      acc += h + 12;
+      acc += h + gap;
     }
     return { heights, offsets, total: acc };
-  }, [pageWidths, containerWidth, zoom, realHeights]);
+  }, [pageDims, containerWidth, zoom]);
 
   const visiblePages = React.useMemo(() => {
     if (!layout.heights.length) return [];
@@ -124,17 +126,16 @@ export function PdfViewer({
   }, [layout, scrollTop, viewportH]);
 
   const currentPage = React.useMemo(() => {
-    if (!layout.heights.length) return initialPage;
+    if (!layout.heights.length) return safePage;
     const mid = scrollTop + viewportH / 3;
     for (let i = 0; i < layout.heights.length; i++) {
       if (mid >= layout.offsets[i] && mid < layout.offsets[i] + layout.heights[i])
         return i + 1;
     }
     return 1;
-  }, [layout, scrollTop, viewportH, initialPage]);
+  }, [layout, scrollTop, viewportH, safePage]);
 
-  // ref holding the latest page so debounced save callbacks read the
-  // current value (not a stale closure from the render that created them)
+  // refs holding latest values so debounced saves read fresh data
   const currentPageRef = React.useRef(currentPage);
   const zoomRef = React.useRef(zoom);
   React.useEffect(() => {
@@ -142,28 +143,28 @@ export function PdfViewer({
     zoomRef.current = zoom;
   });
 
-  // restore initial scroll
+  // restore initial scroll position once layout is ready
   React.useEffect(() => {
     if (!ready || restoredRef.current || !scrollRef.current) return;
     restoredRef.current = true;
-    if (initialScroll > 0) {
+    if (safeScroll > 0) {
       requestAnimationFrame(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollTop = Math.min(
-            initialScroll,
+            safeScroll,
             scrollRef.current.scrollHeight
           );
         }
       });
-    } else if (initialPage > 1) {
-      const offset = layout.offsets[initialPage - 1];
+    } else if (safePage > 1) {
+      const offset = layout.offsets[safePage - 1];
       if (offset != null) {
         requestAnimationFrame(() => {
           if (scrollRef.current) scrollRef.current.scrollTop = offset;
         });
       }
     }
-  }, [ready, initialScroll, initialPage, layout.offsets]);
+  }, [ready, safeScroll, safePage, layout.offsets]);
 
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const st = e.currentTarget.scrollTop;
@@ -178,68 +179,45 @@ export function PdfViewer({
     }, 400);
   };
 
-  /**
-   * Zoom anchored to a specific screen point (cursor or viewport center).
-   * Keeps the document point under that screen point stationary, so the
-   * content doesn't drift up/down. Uses a layout effect to correct scroll
-   * synchronously before the browser paints (no flicker).
-   *
-   * Strategy: record (scrollTop, clientY) before zoom; after zoom the same
-   * document fraction is at fraction = oldScrollPos / oldScrollMax; but to
-   * anchor the CURSOR we need the document point under the cursor. We
-   * compute: docPointUnderCursor = scrollTop + (cursorY - 0) in document
-   * coords... actually simpler: the content scales by (next/zoom), so a
-   * document point at old offset `o` moves to `o * (next/zoom)`. We keep
-   * the point under the cursor fixed:
-   *   oldCursorDocY = scrollTop + cursorY
-   *   newScrollTop  = oldCursorDocY * (next/zoom) - cursorY
-   */
+  // ---- cursor-anchored zoom (synchronous, no flicker, no drift) ----
+  // Because layout is deterministic, scrollHeight is correct immediately
+  // after zoom state changes. The useLayoutEffect corrects scrollTop before
+  // paint, keeping the document point under the cursor stationary.
   const anchorRef = React.useRef<{
-    zoom: number;
+    oldZoom: number;
     next: number;
-    cursorY: number | null; // null = viewport center
+    cursorY: number; // viewport-relative; viewport center if null was passed
     oldScrollTop: number;
-    oldScrollHeight: number;
   } | null>(null);
 
-  const applyZoomAnchored = (
-    next: number,
-    cursorY: number | null
-  ) => {
+  const applyZoomAnchored = (next: number, cursorY: number | null) => {
     const el = scrollRef.current;
     if (!el) {
       setZoom(next);
       return;
     }
     anchorRef.current = {
-      zoom,
+      oldZoom: zoom,
       next,
-      cursorY,
+      cursorY: cursorY ?? el.clientHeight / 2,
       oldScrollTop: el.scrollTop,
-      oldScrollHeight: el.scrollHeight,
     };
     setZoom(next);
   };
 
-  // Synchronously correct scroll position after zoom state changes, before
-  // paint, so there's no visible flicker/jump.
   React.useLayoutEffect(() => {
     const a = anchorRef.current;
     if (!a) return;
     const el = scrollRef.current;
     if (!el) return;
     anchorRef.current = null;
-    if (a.zoom === 0) return;
-    const scale = a.next / a.zoom;
-    const cursorY =
-      a.cursorY != null
-        ? a.cursorY
-        : el.clientHeight / 2;
+    if (a.oldZoom <= 0) return;
+    const scale = a.next / a.oldZoom;
     // document point under the cursor before zoom
-    const docPoint = a.oldScrollTop + cursorY;
+    const docPoint = a.oldScrollTop + a.cursorY;
     // after zoom that point is at docPoint * scale; set scrollTop so it's
-    // under the cursor again: scrollTop = docPoint*scale - cursorY
-    const target = Math.max(0, docPoint * scale - cursorY);
+    // under the cursor again
+    const target = Math.max(0, docPoint * scale - a.cursorY);
     el.scrollTop = target;
     setScrollTop(el.scrollTop);
     if (saveRef.current) clearTimeout(saveRef.current);
@@ -259,7 +237,6 @@ export function PdfViewer({
   const fitWidth = () => applyZoomAnchored(1, null);
 
   // ---- Ctrl+scroll = smooth zoom anchored at the cursor ----
-  // Native non-passive listener so preventDefault stops browser page zoom.
   React.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -271,14 +248,13 @@ export function PdfViewer({
       const next = Math.max(0.25, Math.min(4, +(zoom * factor).toFixed(3)));
       if (next === zoom) return;
       const rect = el.getBoundingClientRect();
-      const cursorY = e.clientY - rect.top;
-      applyZoomAnchored(next, cursorY);
+      applyZoomAnchored(next, e.clientY - rect.top);
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
   }, [zoom, containerWidth]);
 
-  // ---- middle-click drag pan (auto-scroll) ----
+  // ---- middle-click drag pan ----
   const [panning, setPanning] = React.useState(false);
   const panStateRef = React.useRef<{
     panning: boolean;
@@ -286,11 +262,9 @@ export function PdfViewer({
     startY: number;
     scrollLeft: number;
     scrollTop: number;
-    moved: boolean;
-  }>({ panning: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0, moved: false });
+  }>({ panning: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 });
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // middle button (button === 1) initiates pan
     if (e.button !== 1) return;
     const el = scrollRef.current;
     if (!el) return;
@@ -301,24 +275,18 @@ export function PdfViewer({
       startY: e.clientY,
       scrollLeft: el.scrollLeft,
       scrollTop: el.scrollTop,
-      moved: false,
     };
     setPanning(true);
     (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
   };
-
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const st = panStateRef.current;
     if (!st.panning) return;
     const el = scrollRef.current;
     if (!el) return;
-    const dx = e.clientX - st.startX;
-    const dy = e.clientY - st.startY;
-    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) st.moved = true;
-    el.scrollLeft = st.scrollLeft - dx;
-    el.scrollTop = st.scrollTop - dy;
+    el.scrollLeft = st.scrollLeft - (e.clientX - st.startX);
+    el.scrollTop = st.scrollTop - (e.clientY - st.startY);
   };
-
   const endPan = (e: React.PointerEvent<HTMLDivElement>) => {
     const st = panStateRef.current;
     if (!st.panning) return;
@@ -331,6 +299,7 @@ export function PdfViewer({
     }
   };
 
+  // ---- page jump ----
   const [pageInput, setPageInput] = React.useState(String(currentPage));
   React.useEffect(() => {
     setPageInput(String(currentPage));
@@ -402,12 +371,14 @@ export function PdfViewer({
               >
                 <div
                   className="relative mx-auto bg-white shadow-lg shadow-black/10"
-                  style={{ width: renderWidth ?? "100%" }}
+                  style={{ width: renderWidth ?? "100%", height }}
                 >
-                  <MeasuredPage
+                  <Page
                     pageNumber={pageNum}
                     width={renderWidth}
-                    onHeight={(h) => registerPageHeight(pageNum, h)}
+                    renderTextLayer={false}
+                    renderAnnotationLayer={false}
+                    loading=""
                   />
                   <div className="pointer-events-none absolute bottom-1 right-2 rounded bg-black/40 px-1.5 py-0.5 text-[9px] font-medium text-white/90">
                     {pageNum}
@@ -437,9 +408,7 @@ export function PdfViewer({
           </ToolbarBtn>
           <div className="mx-1 h-4 w-px bg-black/10 dark:bg-white/10" />
           <ToolbarBtn
-            onClick={() =>
-              gotoPage(String(Math.max(1, currentPage - 1)))
-            }
+            onClick={() => gotoPage(String(Math.max(1, currentPage - 1)))}
             disabled={!ready || currentPage <= 1}
             title="Previous page"
           >
@@ -509,36 +478,5 @@ function ToolbarBtn({
     >
       {children}
     </button>
-  );
-}
-
-function MeasuredPage({
-  pageNumber,
-  width,
-  onHeight,
-}: {
-  pageNumber: number;
-  width?: number;
-  onHeight: (h: number) => void;
-}) {
-  const ref = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => {
-    if (ref.current) onHeight(ref.current.offsetHeight);
-  });
-  return (
-    <div ref={ref}>
-      <Page
-        pageNumber={pageNumber}
-        width={width}
-        renderTextLayer={false}
-        renderAnnotationLayer={false}
-        loading={
-          <div
-            style={{ height: width ? width * Math.SQRT2 : 400, width }}
-            className="animate-pulse bg-neutral-100"
-          />
-        }
-      />
-    </div>
   );
 }
