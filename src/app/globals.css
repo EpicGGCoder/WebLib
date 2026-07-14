@@ -221,7 +221,8 @@
   -ms-overflow-style: none;
   /* momentum scrolling for touchpads */
   -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
+  /* ensure touchpad two-finger scroll is recognized as panning, not gestures */
+  touch-action: pan-x pan-y;
 }
 .weblib-pdf-scroll::-webkit-scrollbar {
   width: 10px;

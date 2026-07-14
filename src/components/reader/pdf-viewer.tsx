@@ -313,28 +313,25 @@ export function PdfViewer({
   };
 
   // ---- Ctrl+scroll = smooth zoom anchored at the cursor ----
-  // IMPORTANT: the non-passive wheel listener is attached to WINDOW, not to
-  // the scroll container. A non-passive listener on the scroll element
-  // forces the browser to run it before every native scroll → blocks/
-  // janks touchpad scrolling. By putting it on window and checking whether
-  // the cursor is over our viewer, normal scrolling is completely unimpeded
-  // and only ctrl+scroll is intercepted.
+  // Single non-passive listener on the scroll container. It returns
+  // immediately (one if-check) for normal scrolls so the browser can
+  // proceed with native scrolling. For ctrl/meta+scroll it preventDefaults
+  // (to stop browser page-zoom) and applies our cursor-anchored zoom.
   React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
     const handler = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
-      const el = scrollRef.current;
-      if (!el || !el.contains(e.target as Node)) return;
       e.preventDefault();
       if (!containerWidth) return;
-      // gentler factor so each wheel tick is a small step, not a big jump
       const factor = Math.exp(-e.deltaY * 0.001);
       const next = Math.max(0.25, Math.min(4, +(zoom * factor).toFixed(3)));
       if (next === zoom) return;
       const rect = el.getBoundingClientRect();
       applyZoomAnchored(next, e.clientY - rect.top);
     };
-    window.addEventListener("wheel", handler, { passive: false });
-    return () => window.removeEventListener("wheel", handler);
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
   }, [zoom, containerWidth]);
 
   // ---- drag pan (middle-click OR right-click, per settings) ----
@@ -468,7 +465,6 @@ export function PdfViewer({
                   transform: `translateY(${top}px)`,
                   height,
                   willChange: "transform",
-                  contain: "layout style",
                 }}
               >
                 <div
