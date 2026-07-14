@@ -133,6 +133,15 @@ export function PdfViewer({
     return 1;
   }, [layout, scrollTop, viewportH, initialPage]);
 
+  // ref holding the latest page so debounced save callbacks read the
+  // current value (not a stale closure from the render that created them)
+  const currentPageRef = React.useRef(currentPage);
+  const zoomRef = React.useRef(zoom);
+  React.useEffect(() => {
+    currentPageRef.current = currentPage;
+    zoomRef.current = zoom;
+  });
+
   // restore initial scroll
   React.useEffect(() => {
     if (!ready || restoredRef.current || !scrollRef.current) return;
@@ -161,7 +170,11 @@ export function PdfViewer({
     setScrollTop(st);
     if (saveRef.current) clearTimeout(saveRef.current);
     saveRef.current = setTimeout(() => {
-      onStateChange({ page: currentPage, zoom, scroll: st });
+      onStateChange({
+        page: currentPageRef.current,
+        zoom: zoomRef.current,
+        scroll: st,
+      });
     }, 400);
   };
 
@@ -182,7 +195,7 @@ export function PdfViewer({
     if (saveRef.current) clearTimeout(saveRef.current);
     saveRef.current = setTimeout(() => {
       onStateChange({
-        page: currentPage,
+        page: currentPageRef.current,
         zoom: next,
         scroll: el?.scrollTop ?? 0,
       });
