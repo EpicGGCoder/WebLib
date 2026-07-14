@@ -236,6 +236,22 @@ export function PdfViewer({
     applyZoomAnchored(Math.max(0.25, +(zoom - 0.25).toFixed(2)), null);
   const fitWidth = () => applyZoomAnchored(1, null);
 
+  // custom zoom input (click the % to type a value)
+  const [zoomEditing, setZoomEditing] = React.useState(false);
+  const [zoomInput, setZoomInput] = React.useState("");
+  const startZoomEdit = () => {
+    setZoomInput(String(Math.round(zoom * 100)));
+    setZoomEditing(true);
+  };
+  const commitZoom = (val: string) => {
+    setZoomEditing(false);
+    const n = parseInt(val.replace(/[^0-9]/g, ""), 10);
+    if (Number.isNaN(n)) return;
+    // clamp 25%–400%, convert percentage to factor
+    const clamped = Math.max(25, Math.min(400, n));
+    applyZoomAnchored(+(clamped / 100).toFixed(3), null);
+  };
+
   // ---- Ctrl+scroll = smooth zoom anchored at the cursor ----
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -244,7 +260,8 @@ export function PdfViewer({
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       if (!containerWidth) return;
-      const factor = Math.exp(-e.deltaY * 0.0015);
+      // gentler factor so each wheel tick is a small step, not a big jump
+      const factor = Math.exp(-e.deltaY * 0.001);
       const next = Math.max(0.25, Math.min(4, +(zoom * factor).toFixed(3)));
       if (next === zoom) return;
       const rect = el.getBoundingClientRect();
@@ -396,13 +413,35 @@ export function PdfViewer({
           <ToolbarBtn onClick={zoomOut} disabled={!ready} title="Zoom out">
             <Minus className="size-3.5" />
           </ToolbarBtn>
-          <button
-            onClick={fitWidth}
-            className="min-w-[44px] rounded-full px-2 py-1 text-center text-[11px] font-semibold tabular-nums text-neutral-700 transition-colors hover:bg-black/5 dark:text-neutral-200 dark:hover:bg-white/10"
-            title="Fit width (reset zoom)"
-          >
-            {Math.round(zoom * 100)}%
-          </button>
+          {zoomEditing ? (
+            <input
+              autoFocus
+              value={zoomInput}
+              onChange={(e) => setZoomInput(e.target.value.replace(/[^0-9]/g, ""))}
+              onBlur={() => commitZoom(zoomInput)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitZoom(zoomInput);
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setZoomEditing(false);
+                }
+              }}
+              inputMode="numeric"
+              className="h-6 w-12 rounded-full bg-black/5 text-center text-[11px] font-semibold tabular-nums text-neutral-700 outline-none dark:bg-white/10 dark:text-neutral-200"
+              aria-label="Custom zoom percentage"
+              title="Enter a zoom % (25–400) and press Enter"
+            />
+          ) : (
+            <button
+              onClick={startZoomEdit}
+              className="min-w-[44px] rounded-full px-2 py-1 text-center text-[11px] font-semibold tabular-nums text-neutral-700 transition-colors hover:bg-black/5 dark:text-neutral-200 dark:hover:bg-white/10"
+              title="Click to set a custom zoom %"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+          )}
           <ToolbarBtn onClick={zoomIn} disabled={!ready} title="Zoom in">
             <Plus className="size-3.5" />
           </ToolbarBtn>
